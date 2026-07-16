@@ -1,0 +1,20 @@
+# Single image for local development AND CI — so behavior stays identical.
+# Developers don't need Rust on the host: everything runs via docker compose.
+FROM rust:latest
+
+# System tools:
+#  - openssh-client — SSH to the audited host runs via subprocess (system ssh), Stage 2.
+# Cross-compilation linkers are added in Stage 9 (release), not here.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# cargo-watch — interactive dev loop (the `dev` service).
+RUN cargo install cargo-watch --locked
+
+WORKDIR /app
+
+# Pin and pre-install the toolchain from rust-toolchain.toml so it isn't
+# re-synced on every run.
+COPY rust-toolchain.toml .
+RUN rustup show

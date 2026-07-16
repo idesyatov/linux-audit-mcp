@@ -1,0 +1,38 @@
+# Rust build artifacts
+/target
+/dist
+**/*.rs.bk
+*.pdb
+
+# Docker on Windows artifacts
+*;C
+
+# Environment / secrets
+.env
+*.pem
+*.key
+
+# Internal planning (kept out of the public repo)
+/ROADMAP.md
+
+# Claude Code (internal)
+.claude/
+CLAUDE.md
+
+# IDE — VSCode
+.vscode/
+*.code-workspace
+
+# IDE — JetBrains
+.idea/
+*.iml
+
+# Editors
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

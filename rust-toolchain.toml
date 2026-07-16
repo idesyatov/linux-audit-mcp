@@ -1,0 +1,6 @@
+# Toolchain pin: stable channel only, no nightly/beta.
+# The rustfmt/clippy components are needed by the lint service (docker compose) and CI.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

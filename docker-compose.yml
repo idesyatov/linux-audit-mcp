@@ -1,0 +1,48 @@
+# All services use one image (Dockerfile.dev). The image is built once, and the
+# cargo/target caches live in named volumes — rebuilds are fast and the host
+# filesystem is not polluted with build artifacts.
+#
+#   docker compose up dev              # interactive watch: check + test on every change
+#   docker compose run --rm test       # one-off test run
+#   docker compose run --rm lint       # fmt --check + clippy (-D warnings)
+#   docker compose run --rm build-release   # release binary into ./target/release
+
+x-rust: &rust
+  build:
+    context: .
+    dockerfile: Dockerfile.dev
+  image: linux-audit-mcp:dev
+  working_dir: /app
+  volumes:
+    - .:/app
+    - cargo-registry:/usr/local/cargo/registry
+    - cargo-git:/usr/local/cargo/git
+    - target-cache:/app/target
+  environment:
+    CARGO_TERM_COLOR: always
+
+services:
+  dev:
+    <<: *rust
+    command: cargo watch -x check -x test
+    stdin_open: true
+    tty: true
+
+  test:
+    <<: *rust
+    command: cargo test --locked
+
+  lint:
+    <<: *rust
+    command: >
+      sh -c "cargo fmt --all --check &&
+             cargo clippy --all-targets --all-features -- -D warnings"
+
+  build-release:
+    <<: *rust
+    command: cargo build --release --locked
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target-cache:

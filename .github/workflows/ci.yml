@@ -1,0 +1,26 @@
+name: CI
+
+# Run the same Docker image as local development (Dockerfile.dev) through the
+# same docker compose services — so CI and dev do not diverge.
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dev image
+        run: docker compose build dev
+
+      - name: Lint (fmt --check + clippy)
+        run: docker compose run --rm lint
+
+      - name: Tests
+        run: docker compose run --rm test
+
+      - name: Build
+        run: docker compose run --rm build-release
