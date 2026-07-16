@@ -2,8 +2,14 @@
 //! `evaluate(output) -> Outcome`. Separating I/O from logic keeps every check
 //! unit-testable against fixtures without a host (and feeds later-stage evals).
 
+pub mod accounts;
+pub mod firewall;
+pub mod kernel;
+pub mod logging;
 pub mod parse;
+pub mod services;
 pub mod ssh;
+pub mod updates;
 
 use serde::Serialize;
 
@@ -98,6 +104,27 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(ssh::PermitEmptyPasswords),
         Box::new(ssh::X11Forwarding),
         Box::new(ssh::MaxAuthTries),
+        // accounts
+        Box::new(accounts::NonRootUid0),
+        Box::new(accounts::PassMaxDays),
+        Box::new(accounts::DefaultUmask),
+        // kernel
+        Box::new(kernel::Aslr),
+        Box::new(kernel::TcpSyncookies),
+        Box::new(kernel::RpFilter),
+        Box::new(kernel::IpForward),
+        Box::new(kernel::AcceptRedirects),
+        Box::new(kernel::AcceptSourceRoute),
+        // firewall
+        Box::new(firewall::FirewallEnabled),
+        // updates
+        Box::new(updates::SecurityUpdatesPending),
+        // services
+        Box::new(services::CleartextPorts),
+        Box::new(services::RpcbindDisabled),
+        // logging
+        Box::new(logging::AuditdEnabled),
+        Box::new(logging::SyslogEnabled),
     ]
 }
 

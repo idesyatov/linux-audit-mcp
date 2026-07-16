@@ -32,6 +32,8 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "sysctl -a",
     "ss -tuln",
     "systemctl list-unit-files --type=service --no-pager",
+    // `-s` (simulate) performs no actions and needs no root — read-only.
+    "apt-get -s upgrade",
     "uname -a",
 ];
 
