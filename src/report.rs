@@ -1,10 +1,10 @@
-//! Rendering of audit findings: a compact text summary and machine-readable
-//! JSON. Scoring is added in a later stage; for now a report is the findings
-//! plus pass/fail/error counts.
+//! Rendering of audit results: a compact text summary and machine-readable
+//! JSON, both including the security [`Score`].
 
 use serde::Serialize;
 
 use crate::checks::{Finding, Severity, Status};
+use crate::scoring::Score;
 
 fn severity_tag(severity: Severity) -> &'static str {
     match severity {
@@ -16,49 +16,51 @@ fn severity_tag(severity: Severity) -> &'static str {
     }
 }
 
-#[derive(Serialize)]
-struct Summary {
-    passed: usize,
-    failed: usize,
-    errored: usize,
-}
-
-impl Summary {
-    fn of(findings: &[Finding]) -> Self {
-        let mut s = Summary {
-            passed: 0,
-            failed: 0,
-            errored: 0,
-        };
-        for f in findings {
-            match f.status {
-                Status::Pass => s.passed += 1,
-                Status::Fail => s.failed += 1,
-                Status::Error => s.errored += 1,
-            }
-        }
-        s
+fn domain_tag(domain: crate::checks::Domain) -> &'static str {
+    use crate::checks::Domain::*;
+    match domain {
+        Ssh => "ssh",
+        Accounts => "accounts",
+        Kernel => "kernel",
+        Firewall => "firewall",
+        Updates => "updates",
+        Services => "services",
+        Logging => "logging",
     }
 }
 
 #[derive(Serialize)]
 struct Report<'a> {
     target: &'a str,
-    summary: Summary,
+    score: &'a Score,
     findings: &'a [Finding],
 }
 
-/// Human-readable summary.
-pub fn text(target: &str, findings: &[Finding]) -> String {
+/// Human-readable summary: headline score, per-domain scores, then findings.
+pub fn text(target: &str, score: &Score, findings: &[Finding]) -> String {
     use std::fmt::Write;
 
-    let s = Summary::of(findings);
+    let passed = findings.iter().filter(|f| f.status == Status::Pass).count();
+    let failed = findings.iter().filter(|f| f.status == Status::Fail).count();
+    let errored = findings
+        .iter()
+        .filter(|f| f.status == Status::Error)
+        .count();
+
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Audit of '{target}': {} passed, {} failed, {} errored",
-        s.passed, s.failed, s.errored
+        "Audit of '{target}': score {}/100 ({passed} passed, {failed} failed, {errored} errored)",
+        score.total
     );
+
+    let domains: Vec<String> = score
+        .domains
+        .iter()
+        .map(|d| format!("{} {}", domain_tag(d.domain), d.score))
+        .collect();
+    let _ = writeln!(out, "  domains: {}", domains.join(", "));
+
     for f in findings {
         let mark = match f.status {
             Status::Pass => "PASS",
@@ -79,11 +81,11 @@ pub fn text(target: &str, findings: &[Finding]) -> String {
     out
 }
 
-/// Machine-readable JSON: `{ target, summary, findings }`.
-pub fn json(target: &str, findings: &[Finding]) -> serde_json::Result<String> {
+/// Machine-readable JSON: `{ target, score, findings }`.
+pub fn json(target: &str, score: &Score, findings: &[Finding]) -> serde_json::Result<String> {
     serde_json::to_string_pretty(&Report {
         target,
-        summary: Summary::of(findings),
+        score,
         findings,
     })
 }

@@ -10,6 +10,7 @@ mod catalog;
 mod checks;
 mod config;
 mod report;
+mod scoring;
 mod server;
 mod ssh;
 

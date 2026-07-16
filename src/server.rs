@@ -13,7 +13,7 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 
-use crate::{audit, config, report};
+use crate::{audit, config, report, scoring};
 
 #[derive(Clone)]
 pub(crate) struct AuditServer {
@@ -58,8 +58,9 @@ impl AuditServer {
             .await
             .map_err(|e| McpError::internal_error(format!("audit failed: {e}"), None))?;
 
-        let text = report::text(&params.target, &findings);
-        let json = report::json(&params.target, &findings)
+        let score = scoring::score(&findings);
+        let text = report::text(&params.target, &score, &findings);
+        let json = report::json(&params.target, &score, &findings)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         Ok(CallToolResult::success(vec![
