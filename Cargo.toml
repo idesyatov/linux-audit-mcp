@@ -10,6 +10,9 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
+# CLI argument parsing for the `audit` subcommand (cron/CI mode).
+clap = { version = "4", features = ["derive"] }
+
 # Official Rust SDK for the Model Context Protocol (stdio transport). Stage 1.
 rmcp = { version = "2", features = ["server", "transport-io"] }
 
