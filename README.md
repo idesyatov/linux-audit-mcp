@@ -34,6 +34,20 @@ docker compose up dev           # interactive watch
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Install from a release
+
+Prebuilt binaries are published on the [Releases](https://github.com/idesyatov/linux-audit-mcp/releases)
+page for Linux (x86_64, aarch64) and macOS (x86_64, arm64). Download the archive
+for your platform, extract it, and put the binary on your `PATH`:
+
+```bash
+tar xzf linux-audit-mcp-v0.1.0-linux-amd64.tar.gz
+sudo install linux-audit-mcp-v0.1.0-linux-amd64/linux-audit-mcp /usr/local/bin/
+```
+
+Maintainers cut a release with `make bump VERSION=vX.Y.Z && make release VERSION=vX.Y.Z`;
+pushing the tag triggers the cross-platform build and publishes the archives.
+
 ## Use with an MCP client
 
 Build the binary (`docker compose run --rm build-release` → `target/release/`),

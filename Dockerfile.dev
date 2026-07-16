@@ -3,10 +3,13 @@
 FROM rust:latest
 
 # System tools:
-#  - openssh-client — SSH to the audited host runs via subprocess (system ssh), Stage 2.
-# Cross-compilation linkers are added in Stage 9 (release), not here.
+#  - openssh-client — SSH to the audited host runs via subprocess (system ssh).
+#  - gcc-aarch64 / libc6-dev-arm64 — linker + headers for the aarch64 release
+#    target (Stage 9). x86_64 is the image's native target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
+        gcc-aarch64-linux-gnu \
+        libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
 # cargo-watch — interactive dev loop (the `dev` service).
@@ -14,7 +17,15 @@ RUN cargo install cargo-watch --locked
 
 WORKDIR /app
 
-# Pin and pre-install the toolchain from rust-toolchain.toml so it isn't
-# re-synced on every run.
+# Pin the toolchain BEFORE adding cross targets, so std is installed for the
+# exact toolchain rust-toolchain.toml selects at runtime (otherwise the cross
+# target lands on the image default and the pinned one is missing std).
 COPY rust-toolchain.toml .
-RUN rustup show
+RUN rustup show \
+    && rustup target add \
+        x86_64-unknown-linux-gnu \
+        aarch64-unknown-linux-gnu
+
+# macOS targets are built on a native runner in release.yml (osxcross from Linux
+# is impractical).
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
