@@ -2,14 +2,18 @@
 //!
 //! Tools:
 //!   - `ping` — liveness stub.
-//!
-//! The read-only audit tool (`run_audit`, over a target *alias* from the
-//! operator config) arrives in Stage 3.
+//!   - `run_audit` — runs the read-only audit against a target *alias* defined
+//!     in the operator config. Connection details never come from tool
+//!     arguments, so a prompt-injected model cannot choose an arbitrary host or
+//!     key (see [`crate::config`]).
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter, model::*, tool, tool_handler, tool_router,
-    transport::stdio, ErrorData as McpError, ServerHandler, ServiceExt,
+    handler::server::router::tool::ToolRouter, handler::server::wrapper::Parameters, model::*,
+    schemars, tool, tool_handler, tool_router, transport::stdio, ErrorData as McpError,
+    ServerHandler, ServiceExt,
 };
+
+use crate::{audit, config, report};
 
 #[derive(Clone)]
 pub(crate) struct AuditServer {
@@ -17,6 +21,12 @@ pub(crate) struct AuditServer {
     // pass doesn't see that macro-generated read, hence the allow.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct RunAuditParams {
+    #[schemars(description = "Alias of a target defined in the operator config")]
+    target: String,
 }
 
 #[tool_router]
@@ -32,6 +42,31 @@ impl AuditServer {
     async fn ping(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::success(vec![ContentBlock::text("pong")]))
     }
+
+    #[tool(description = "Run the read-only security audit against a configured target (by alias)")]
+    async fn run_audit(
+        &self,
+        Parameters(params): Parameters<RunAuditParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cfg = config::load()
+            .map_err(|e| McpError::internal_error(format!("config error: {e}"), None))?;
+        let target = cfg
+            .target(&params.target)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let findings = audit::run_audit(&target.to_ssh_config())
+            .await
+            .map_err(|e| McpError::internal_error(format!("audit failed: {e}"), None))?;
+
+        let text = report::text(&params.target, &findings);
+        let json = report::json(&params.target, &findings)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(text),
+            ContentBlock::text(json),
+        ]))
+    }
 }
 
 #[tool_handler]
@@ -41,8 +76,9 @@ impl ServerHandler for AuditServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "Read-only security audit for Linux servers. `ping` is a liveness check; \
-                 the audit tool arrives in a later stage."
+                "Read-only security audit for Linux servers. Use `run_audit` with a target \
+                 alias (defined in the operator config) to audit a host; `ping` is a liveness \
+                 check."
                     .to_string(),
             )
     }
