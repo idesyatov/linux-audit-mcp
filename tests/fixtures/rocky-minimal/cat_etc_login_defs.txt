@@ -1,0 +1,4 @@
+# /etc/login.defs (Rocky)
+PASS_MAX_DAYS   99999
+PASS_MIN_DAYS   0
+UMASK           077

@@ -15,6 +15,10 @@ mod scoring;
 mod server;
 mod ssh;
 
+// Stage 8 evals: regression tests over captured per-distro output (tests/fixtures).
+#[cfg(test)]
+mod evals;
+
 use clap::Parser;
 
 #[tokio::main]

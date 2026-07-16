@@ -1,0 +1,29 @@
+{
+  "description": "Rocky/RHEL host: root login and password auth on, X11 forwarding on, no password expiry, ip_forward enabled, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors).",
+  "findings": {
+    "ssh-permit-root-login": "fail",
+    "ssh-password-authentication": "fail",
+    "ssh-permit-empty-passwords": "pass",
+    "ssh-x11-forwarding": "fail",
+    "ssh-max-auth-tries": "pass",
+    "accounts-nonroot-uid0": "pass",
+    "accounts-pass-max-days": "fail",
+    "accounts-umask": "pass",
+    "kernel-aslr": "pass",
+    "kernel-tcp-syncookies": "pass",
+    "kernel-rp-filter": "pass",
+    "kernel-ip-forward": "fail",
+    "kernel-accept-redirects": "pass",
+    "kernel-source-route": "pass",
+    "firewall-enabled": "pass",
+    "updates-security-pending": "error",
+    "services-cleartext-ports": "fail",
+    "services-rpcbind": "fail",
+    "logging-auditd": "pass",
+    "logging-syslog": "pass"
+  },
+  "scores": {
+    "baseline": 65,
+    "hardened": 55
+  }
+}

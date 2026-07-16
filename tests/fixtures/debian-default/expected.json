@@ -1,0 +1,29 @@
+{
+  "description": "Stock Debian: default root login (prohibit-password), password auth on, MaxAuthTries 6, no password expiry, umask 022, one insecure sysctl, no host firewall, pending security updates, auditd absent.",
+  "findings": {
+    "ssh-permit-root-login": "fail",
+    "ssh-password-authentication": "fail",
+    "ssh-permit-empty-passwords": "pass",
+    "ssh-x11-forwarding": "pass",
+    "ssh-max-auth-tries": "fail",
+    "accounts-nonroot-uid0": "pass",
+    "accounts-pass-max-days": "fail",
+    "accounts-umask": "fail",
+    "kernel-aslr": "pass",
+    "kernel-tcp-syncookies": "pass",
+    "kernel-rp-filter": "pass",
+    "kernel-ip-forward": "pass",
+    "kernel-accept-redirects": "fail",
+    "kernel-source-route": "pass",
+    "firewall-enabled": "fail",
+    "updates-security-pending": "fail",
+    "services-cleartext-ports": "pass",
+    "services-rpcbind": "pass",
+    "logging-auditd": "fail",
+    "logging-syslog": "pass"
+  },
+  "scores": {
+    "baseline": 54,
+    "hardened": 41
+  }
+}

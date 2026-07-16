@@ -1,0 +1,5 @@
+# Stock Debian sshd_config (relevant directives)
+PasswordAuthentication yes
+X11Forwarding no
+# PermitRootLogin unset -> prohibit-password (default)
+# MaxAuthTries unset -> 6 (default)

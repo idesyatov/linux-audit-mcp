@@ -1,0 +1,6 @@
+UNIT FILE                  STATE    PRESET
+rpcbind.service            disabled disabled
+rsyslog.service            enabled  enabled
+ssh.service                enabled  enabled
+
+3 unit files listed.

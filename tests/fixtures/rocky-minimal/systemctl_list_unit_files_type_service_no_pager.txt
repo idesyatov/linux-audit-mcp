@@ -1,0 +1,8 @@
+UNIT FILE                  STATE    PRESET
+auditd.service             enabled  enabled
+firewalld.service          enabled  enabled
+rpcbind.service            enabled  enabled
+rsyslog.service            enabled  enabled
+sshd.service               enabled  enabled
+
+5 unit files listed.
