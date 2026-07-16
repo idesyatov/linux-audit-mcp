@@ -27,6 +27,12 @@ pub(crate) struct AuditServer {
 pub(crate) struct RunAuditParams {
     #[schemars(description = "Alias of a target defined in the operator config")]
     target: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Audit profile: \"baseline\" (default) or \"hardened\"; \
+                              overrides the target's configured profile"
+    )]
+    profile: Option<String>,
 }
 
 #[tool_router]
@@ -54,11 +60,19 @@ impl AuditServer {
             .target(&params.target)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
+        // Profile precedence: tool argument → target config → Baseline.
+        let profile = match params.profile.as_deref() {
+            Some(name) => scoring::Profile::parse(name).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown profile {name:?}"), None)
+            })?,
+            None => target.profile.unwrap_or_default(),
+        };
+
         let findings = audit::run_audit(&target.to_ssh_config())
             .await
             .map_err(|e| McpError::internal_error(format!("audit failed: {e}"), None))?;
 
-        let score = scoring::score(&findings);
+        let score = scoring::score(&findings, profile);
         let text = report::text(&params.target, &score, &findings);
         let json = report::json(&params.target, &score, &findings)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;

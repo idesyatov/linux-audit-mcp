@@ -47,10 +47,14 @@ pub fn text(target: &str, score: &Score, findings: &[Finding]) -> String {
         .filter(|f| f.status == Status::Error)
         .count();
 
+    let profile = match score.profile {
+        crate::scoring::Profile::Baseline => "baseline",
+        crate::scoring::Profile::Hardened => "hardened",
+    };
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "Audit of '{target}': score {}/100 ({passed} passed, {failed} failed, {errored} errored)",
+        "Audit of '{target}' [{profile}]: score {}/100 ({passed} passed, {failed} failed, {errored} errored)",
         score.total
     );
 
