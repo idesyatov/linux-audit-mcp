@@ -110,7 +110,7 @@ impl Check for DefaultUmask {
             .cloned()
             .unwrap_or_else(|| "022".to_string());
         match u32::from_str_radix(raw.trim(), 8) {
-            // Group and other must have no access → those bits set in the mask.
+            // Group and other must have no access -> those bits set in the mask.
             Ok(mask) if mask & 0o027 == 0o027 => Outcome::pass(format!("UMASK is {raw}.")),
             Ok(_) => Outcome::fail(format!("UMASK is {raw} (too permissive; use 027 or 077).")),
             Err(_) => Outcome::fail(format!("UMASK is not octal: {raw:?}.")),
@@ -149,7 +149,7 @@ mod tests {
         assert_eq!(DefaultUmask.evaluate("UMASK 027\n").status, Status::Pass);
         assert_eq!(DefaultUmask.evaluate("UMASK 077\n").status, Status::Pass);
         assert_eq!(DefaultUmask.evaluate("UMASK 022\n").status, Status::Fail);
-        // Unset → default 022 → fail.
+        // Unset -> default 022 -> fail.
         assert_eq!(DefaultUmask.evaluate("# nothing\n").status, Status::Fail);
     }
 }

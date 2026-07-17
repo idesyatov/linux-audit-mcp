@@ -21,7 +21,7 @@ async fn ping_tool_is_advertised_and_returns_pong() -> anyhow::Result<()> {
         "run_audit not advertised: {names:?}"
     );
 
-    // tools/call ping → "pong".
+    // tools/call ping -> "pong".
     let result = client.call_tool(CallToolRequestParams::new("ping")).await?;
     let json = serde_json::to_string(&result)?;
     assert!(json.contains("pong"), "unexpected ping result: {json}");

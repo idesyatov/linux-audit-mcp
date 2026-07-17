@@ -1,10 +1,10 @@
-# Single image for local development AND CI — so behavior stays identical.
+# Single image for local development AND CI - so behavior stays identical.
 # Developers don't need Rust on the host: everything runs via docker compose.
 FROM rust:latest
 
 # System tools:
-#  - openssh-client — SSH to the audited host runs via subprocess (system ssh).
-#  - gcc-aarch64 / libc6-dev-arm64 — linker + headers for the aarch64 release
+#  - openssh-client - SSH to the audited host runs via subprocess (system ssh).
+#  - gcc-aarch64 / libc6-dev-arm64 - linker + headers for the aarch64 release
 #    target (Stage 9). x86_64 is the image's native target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
-# cargo-watch — interactive dev loop (the `dev` service).
+# cargo-watch - interactive dev loop (the `dev` service).
 RUN cargo install cargo-watch --locked
 
 WORKDIR /app

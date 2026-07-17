@@ -3,10 +3,10 @@
 //! expected per-check status and per-profile score.
 //!
 //! Guards against regressions in parsing, check logic and scoring on realistic,
-//! per-distribution output — without a host. A fixture directory holds one
+//! per-distribution output - without a host. A fixture directory holds one
 //! `<command-slug>.txt` per command a check issues (see [`command_slug`]) and an
 //! `expected.json`. A command whose file is *absent* is treated as unavailable
-//! on that distro (an `Error` finding) — e.g. `apt-get` on a non-Debian host.
+//! on that distro (an `Error` finding) - e.g. `apt-get` on a non-Debian host.
 //! The runner discovers every fixture, so adding a distro needs no code change.
 
 use std::collections::HashMap;
@@ -98,7 +98,7 @@ fn run_scenario(scenario: &Path, name: &str) {
         assert_eq!(
             status_name(f.status),
             want,
-            "[{name}] check '{}': expected {want}, got {} — {}",
+            "[{name}] check '{}': expected {want}, got {} - {}",
             f.id,
             status_name(f.status),
             f.detail

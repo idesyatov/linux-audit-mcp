@@ -1,11 +1,11 @@
-# Makefile — wrappers around docker compose.
+# Makefile - wrappers around docker compose.
 # Rust is not required on the host: build/test/lint run inside the container.
 # Requires: docker, docker compose, git, make.
 
 .DEFAULT_GOAL := help
 
 RELEASE_BRANCH ?= master
-# Crate version from Cargo.toml — must match the numeric part of the release tag.
+# Crate version from Cargo.toml - must match the numeric part of the release tag.
 CARGO_VERSION := $(shell grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
 
 .PHONY: help build dev test lint build-release check version clean bump release
@@ -56,7 +56,7 @@ endif
 # Release: make release VERSION=v0.1.1
 # Pushes the branch and the tag; pushing the tag triggers
 # .github/workflows/release.yml, which builds binaries and publishes a Release.
-# The tag must match the version in Cargo.toml — run `make bump` first.
+# The tag must match the version in Cargo.toml - run `make bump` first.
 release: ## Release: make release VERSION=vX.Y.Z (branch + tag + push)
 ifndef VERSION
 	$(error VERSION is not set. Usage: make release VERSION=v$(CARGO_VERSION))

@@ -73,13 +73,13 @@ pub fn text(target: &str, score: &Score, findings: &[Finding]) -> String {
         };
         let _ = writeln!(
             out,
-            "  [{mark}] {:<8} {} — {}",
+            "  [{mark}] {:<8} {} - {}",
             severity_tag(f.severity),
             f.id,
             f.detail
         );
         if f.status == Status::Fail {
-            let _ = writeln!(out, "           ↳ {}", f.recommendation);
+            let _ = writeln!(out, "           -> {}", f.recommendation);
         }
     }
     out

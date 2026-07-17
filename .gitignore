@@ -19,11 +19,11 @@
 .claude/
 CLAUDE.md
 
-# IDE — VSCode
+# IDE - VSCode
 .vscode/
 *.code-workspace
 
-# IDE — JetBrains
+# IDE - JetBrains
 .idea/
 *.iml
 

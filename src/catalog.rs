@@ -7,9 +7,9 @@
 //!
 //! Two layers, deny by default:
 //!   1. a positive character set, so shell metacharacters that could chain or
-//!      inject a second command (`; & | ` $ < > ( ) * ? ' "` …) can never appear
-//!      — the remote sshd still runs the command through a login shell;
-//!   2. exact membership in [`READONLY_COMMANDS`] — the only commands allowed.
+//!      inject a second command (`; & | ` $ < > ( ) * ? ' "` ...) can never
+//!      appear (the remote sshd still runs the command through a login shell);
+//!   2. exact membership in [`READONLY_COMMANDS`] - the only commands allowed.
 //!
 //! Keep the remote vocabulary tiny: prefer dumb readers (`cat <fixed file>`,
 //! `sysctl -a`, `ss -tuln`) and do all parsing in Rust. Fewer commands means a
@@ -32,7 +32,7 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "sysctl -a",
     "ss -tuln",
     "systemctl list-unit-files --type=service --no-pager",
-    // `-s` (simulate) performs no actions and needs no root — read-only.
+    // `-s` (simulate) performs no actions and needs no root - read-only.
     "apt-get -s upgrade",
     "uname -a",
 ];
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn rejects_commands_outside_the_catalog() {
-        // Charset-clean, but not read-only / not listed → refused.
+        // Charset-clean, but not read-only / not listed -> refused.
         for cmd in [
             "systemctl restart sshd", // write action
             "cat /etc/shadow",        // root-only, deliberately absent

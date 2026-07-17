@@ -1,7 +1,7 @@
-//! Security scoring: turn findings into a 0–100 score with a per-domain
+//! Security scoring: turn findings into a 0-100 score with a per-domain
 //! breakdown.
 //!
-//! `S = clamp( Σ(weight_i × domain_score_i) − penalties, 0, 100 )`
+//! `S = clamp( sum(weight_i x domain_score_i) - penalties, 0, 100 )`
 //!
 //! Each failed check deducts from its domain's score by severity, and High /
 //! Critical failures add a *global* penalty so a single severe issue drags the
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn single_high_failure_applies_domain_and_penalty() {
         // Ssh (weight 0.20) with one High fail: domain 70, base = 0.20*70 + 0.80*100 = 94,
-        // minus penalty 8 → 86.
+        // minus penalty 8 -> 86.
         let findings = vec![finding(Domain::Ssh, Severity::High, Status::Fail)];
         let s = score(&findings, Profile::Baseline);
         assert_eq!(s.penalties, 8);
@@ -232,8 +232,8 @@ mod tests {
     #[test]
     fn critical_failure_penalized_hard() {
         // Accounts one Critical.
-        // Baseline (0.15): domain 50, base = 92.5, penalty 20 → 72.5 → 73.
-        // Hardened (0.20): domain 50, base = 90, penalty 20*1.5=30 → 60.
+        // Baseline (0.15): domain 50, base = 92.5, penalty 20 -> 72.5 -> 73.
+        // Hardened (0.20): domain 50, base = 90, penalty 20*1.5=30 -> 60.
         let findings = vec![finding(Domain::Accounts, Severity::Critical, Status::Fail)];
         let base = score(&findings, Profile::Baseline);
         assert_eq!(base.penalties, 20);

@@ -1,7 +1,7 @@
 name: CI
 
 # Run the same Docker image as local development (Dockerfile.dev) through the
-# same docker compose services — so CI and dev do not diverge.
+# same docker compose services - so CI and dev do not diverge.
 on:
   push:
     branches: [ master, main ]

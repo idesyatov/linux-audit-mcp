@@ -53,7 +53,7 @@ pub struct AuditArgs {
     #[arg(long, value_enum, default_value = "high")]
     fail_on: FailOn,
 
-    /// Exit 2 if the total score is below this value (0–100).
+    /// Exit 2 if the total score is below this value (0-100).
     #[arg(long)]
     fail_under: Option<u8>,
 }

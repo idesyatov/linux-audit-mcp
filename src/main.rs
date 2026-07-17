@@ -1,4 +1,4 @@
-//! linux-audit-mcp — read-only security audit of Linux servers over MCP.
+//! linux-audit-mcp - read-only security audit of Linux servers over MCP.
 //!
 //! `main` wires the pieces and routes the CLI: the default (no subcommand) is
 //! the MCP stdio server ([`server`]); the `audit` subcommand ([`cli`]) runs a

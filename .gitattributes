@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repo for all text files; Git decides what
+# is text. This keeps checkouts consistent across Windows/macOS/Linux.
+* text=auto eol=lf
+
+# Never touch binaries.
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary

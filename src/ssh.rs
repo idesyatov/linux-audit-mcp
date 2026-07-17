@@ -24,8 +24,8 @@ use crate::catalog::{self, CatalogError};
 /// Prepended to the remote command's `PATH`. A non-interactive SSH session's
 /// PATH usually omits `/sbin` and `/usr/sbin`, where some read-only tools live
 /// (`sysctl` everywhere; `ss` on RHEL-family). This is a fixed, trusted literal
-/// — it never carries user input, so it can't widen the read-only guarantee
-/// (which is still enforced on the bare command by [`catalog`]).
+/// that never carries user input, so it can't widen the read-only guarantee
+/// (still enforced on the bare command by [`catalog`]).
 const REMOTE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin";
 
 /// `ssh -o StrictHostKeyChecking=<mode>`.
@@ -64,7 +64,7 @@ pub struct SshConfig {
     pub strict_host_key: StrictHostKey,
     /// Custom known_hosts file (`ssh -o UserKnownHostsFile`).
     pub known_hosts: Option<PathBuf>,
-    /// Escape hatch for extra `ssh` options, e.g. `-o` `ProxyJump=…`.
+    /// Escape hatch for extra `ssh` options, e.g. `-o` `ProxyJump=...`.
     pub extra_opts: Vec<String>,
 }
 

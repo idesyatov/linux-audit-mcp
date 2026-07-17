@@ -55,7 +55,7 @@ impl Check for CleartextPorts {
     }
 }
 
-/// The RPC portmapper (`rpcbind`) is enabled — a common attack surface.
+/// The RPC portmapper (`rpcbind`) is enabled - a common attack surface.
 pub struct RpcbindDisabled;
 
 impl Check for RpcbindDisabled {

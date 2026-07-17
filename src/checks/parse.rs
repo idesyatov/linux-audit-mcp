@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-/// Parse whitespace-separated `KEY value` config — the shape of `sshd_config`,
+/// Parse whitespace-separated `KEY value` config - the shape of `sshd_config`,
 /// `login.defs` and similar files.
 ///
 /// Comments (`#`) and blank lines are ignored; keys are lowercased and the
@@ -79,7 +79,7 @@ pub fn parse_sysctl(output: &str) -> HashMap<String, String> {
 
 /// Parse `systemctl list-unit-files` into a `unit -> state` map, e.g.
 /// `{"firewalld.service": "enabled"}`. The header and footer lines don't match
-/// the `unit state …` shape and are skipped.
+/// the `unit state ...` shape and are skipped.
 pub fn parse_unit_files(output: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in output.lines() {

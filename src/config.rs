@@ -1,7 +1,7 @@
 //! Operator-owned registry of audit targets.
 //!
-//! Sensitive connection details (host, user, key) live here — in a file the
-//! operator controls — never in MCP tool arguments. The `run_audit` tool only
+//! Sensitive connection details (host, user, key) live here - in a file the
+//! operator controls - never in MCP tool arguments. The `run_audit` tool only
 //! accepts a target *alias*, so a (possibly prompt-injected) model can neither
 //! choose an arbitrary host (SSRF) nor point at an arbitrary key file.
 //!

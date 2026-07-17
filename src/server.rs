@@ -1,8 +1,8 @@
 //! MCP server handler and the stdio serve loop.
 //!
 //! Tools:
-//!   - `ping` — liveness stub.
-//!   - `run_audit` — runs the read-only audit against a target *alias* defined
+//!   - `ping` - liveness stub.
+//!   - `run_audit` - runs the read-only audit against a target *alias* defined
 //!     in the operator config. Connection details never come from tool
 //!     arguments, so a prompt-injected model cannot choose an arbitrary host or
 //!     key (see [`crate::config`]).
@@ -44,7 +44,7 @@ impl AuditServer {
     }
 
     /// Liveness stub: returns "pong".
-    #[tool(description = "Health check — returns \"pong\"")]
+    #[tool(description = "Health check - returns \"pong\"")]
     async fn ping(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::success(vec![ContentBlock::text("pong")]))
     }
@@ -60,7 +60,7 @@ impl AuditServer {
             .target(&params.target)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-        // Profile precedence: tool argument → target config → Baseline.
+        // Profile precedence: tool argument -> target config -> Baseline.
         let profile = match params.profile.as_deref() {
             Some(name) => scoring::Profile::parse(name).ok_or_else(|| {
                 McpError::invalid_params(format!("unknown profile {name:?}"), None)

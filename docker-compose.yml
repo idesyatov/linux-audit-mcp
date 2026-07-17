@@ -1,5 +1,5 @@
 # All services use one image (Dockerfile.dev). The image is built once, and the
-# cargo/target caches live in named volumes — rebuilds are fast and the host
+# cargo/target caches live in named volumes - rebuilds are fast and the host
 # filesystem is not polluted with build artifacts.
 #
 #   docker compose up dev              # interactive watch: check + test on every change

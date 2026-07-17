@@ -1,7 +1,7 @@
 //! Kernel-domain checks (`sysctl -a`).
 //!
 //! Each check reads one hardening-relevant sysctl. A key that isn't reported is
-//! treated as a failure — the auditor can't confirm the safe value.
+//! treated as a failure - the auditor can't confirm the safe value.
 
 use super::parse::parse_sysctl;
 use super::{Check, Domain, Outcome, Severity};
@@ -127,7 +127,7 @@ mod tests {
             Aslr.evaluate("kernel.randomize_va_space = 0\n").status,
             Status::Fail
         );
-        // Not reported → fail.
+        // Not reported -> fail.
         assert_eq!(Aslr.evaluate("").status, Status::Fail);
     }
 
