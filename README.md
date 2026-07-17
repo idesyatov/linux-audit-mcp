@@ -35,25 +35,36 @@ Audit of 'web' [baseline]: score 53/100 (10 passed, 10 failed, 0 errored)
 
 ## Quick Start
 
-Run it as a **Docker container** (identical on Linux/macOS/Windows) or a **native
-binary**. First describe a target — one `[targets.<alias>]` block per host:
+Most people want the same thing first: **a one-off security report for a host
+(say, a VPS), from the terminal.** That's the path below — auditing from Claude or
+gating CI reuse the very same config (see the table after).
+
+**1. Get the tool** — either is fine:
+
+```bash
+docker run --rm ghcr.io/idesyatov/linux-audit-mcp:latest --version   # needs only Docker
+# ...or download a native binary for your OS — see Installation.
+```
+
+**2. Describe the target** in `~/.config/linux-audit-mcp/targets.toml`:
 
 ```toml
-# ~/.config/linux-audit-mcp/targets.toml
 [targets.web]
 host = "203.0.113.10"
 user = "auditor"                        # unprivileged account on the target
-identity_file = "~/.ssh/audit_ed25519"  # your SSH private key
+identity_file = "~/.ssh/audit_ed25519"  # your key; for Docker use "/keys/id_ed25519"
 ```
 
-Then audit by **alias**:
+The target just needs an unprivileged `auditor` user reachable by your key — see
+**Configuration** to set that up.
+
+**3. Run the audit** by alias:
 
 ```bash
-# Native binary (install it first — see Installation)
+# native binary
 linux-audit-mcp audit --target web
 
-# ...or Docker, nothing to install but Docker itself.
-# Note: inside the container set identity_file = "/keys/id_ed25519".
+# ...or Docker (mount the config + key, read-only)
 docker run -i --rm \
   -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
   -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
@@ -61,9 +72,17 @@ docker run -i --rm \
   ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web
 ```
 
-The target needs an unprivileged `auditor` user reachable by your key — see
-**Configuration**. To wire it into Claude, see **Usage** (native) or **Run via
-Docker** (container, hardened).
+### Which way is for me?
+
+| I want to…                                | Use                                                       |
+| ----------------------------------------- | --------------------------------------------------------- |
+| Check a host now, or on a schedule (cron) | the CLI above — flags & exit-code gates in **Usage**      |
+| Audit hosts by chatting with **Claude**   | the MCP server — **Usage** (binary) or **Run via Docker** |
+| **Gate CI/CD** on findings                | the CLI with `--fail-on` / `--fail-under` (**Usage**)     |
+
+**Binary or Docker?** Same result. If you already run Docker, `docker run`
+installs nothing; otherwise grab the binary. For Claude, Docker is the most
+portable.
 
 <details>
 <summary><b>Installation</b></summary>
