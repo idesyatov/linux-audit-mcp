@@ -293,7 +293,9 @@ docker compose up dev           # interactive watch
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). CI runs the same services in the same
-image.
+image. For how the pieces fit together (component and request-flow diagrams, the
+read-only trust boundary, and how to add a check) see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Tech stack
 
