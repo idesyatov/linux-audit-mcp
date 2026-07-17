@@ -4,12 +4,14 @@ FROM rust:latest
 
 # System tools:
 #  - openssh-client - SSH to the audited host runs via subprocess (system ssh).
-#  - gcc-aarch64 / libc6-dev-arm64 - linker + headers for the aarch64 release
-#    target (Stage 9). x86_64 is the image's native target.
+#  - gcc-aarch64 / libc6-dev-arm64 - linker + headers for the aarch64 release.
+#  - gcc-mingw-w64 - linker for the x86_64 Windows release target.
+# x86_64 Linux is the image's native target.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-client \
         gcc-aarch64-linux-gnu \
         libc6-dev-arm64-cross \
+        gcc-mingw-w64-x86-64 \
     && rm -rf /var/lib/apt/lists/*
 
 # cargo-watch - interactive dev loop (the `dev` service).
@@ -24,7 +26,8 @@ COPY rust-toolchain.toml .
 RUN rustup show \
     && rustup target add \
         x86_64-unknown-linux-gnu \
-        aarch64-unknown-linux-gnu
+        aarch64-unknown-linux-gnu \
+        x86_64-pc-windows-gnu
 
 # macOS targets are built on a native runner in release.yml (osxcross from Linux
 # is impractical).

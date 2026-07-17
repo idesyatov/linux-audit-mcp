@@ -47,55 +47,102 @@ Audit of 'web' [baseline]: score 53/100 (10 passed, 10 failed, 0 errored)
 
 ## Quick Start
 
-```bash
-# 1. Build the binary (Docker; no Rust needed on the host)
-make build-release            # -> target/release/linux-audit-mcp
+Run it as a **Docker container** (identical on Linux/macOS/Windows — recommended
+for MCP) or as a **native binary**. Either way it audits over SSH with a key you
+supply and takes a target **alias**, never a raw host.
 
-# 2. Point it at a host you control (see Configuration)
+### Docker
+
+The image is published from the `v0.1.1` release. Register a target, then run —
+note `identity_file` is the path **inside the container**:
+
+```bash
 mkdir -p ~/.config/linux-audit-mcp
 cat > ~/.config/linux-audit-mcp/targets.toml <<'EOF'
 [targets.web]
 host = "203.0.113.10"
 user = "auditor"
-identity_file = "~/.ssh/id_ed25519"
+identity_file = "/keys/id_ed25519"        # path INSIDE the container
 EOF
 
-# 3. Audit it
+docker run -i --rm \
+  -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
+  -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
+  -e LINUX_AUDIT_CONFIG=/config/targets.toml \
+  ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web
+```
+
+Claude Desktop (MCP) wiring and the hardened flags (`--cap-drop`, `--read-only`,
+signature + digest pinning) are under **Run via Docker**.
+
+### Native binary
+
+```bash
+# Install for your OS/arch (see Installation), then:
+mkdir -p ~/.config/linux-audit-mcp
+cat > ~/.config/linux-audit-mcp/targets.toml <<'EOF'
+[targets.web]
+host = "203.0.113.10"
+user = "auditor"
+identity_file = "~/.ssh/audit_ed25519"    # path on THIS machine
+EOF
+
 linux-audit-mcp audit --target web
 ```
+
+Windows: same idea in PowerShell — see **Installation** and **Configuration**.
+Full target options are under **Configuration**; CLI flags and MCP setup under
+**Usage**.
 
 <details>
 <summary><b>Installation</b></summary>
 
-### From a release (recommended)
-
 Prebuilt archives are on the [Releases](https://github.com/idesyatov/linux-audit-mcp/releases)
 page. Install on the machine you'll **run the auditor from** (not the target).
-Not sure which file? Run `uname -sm` and match the table:
+Pick the archive for your platform:
 
-| Your platform            | `uname -s` / `-m`   | Archive suffix |
-| ------------------------ | ------------------- | -------------- |
-| Linux, Intel/AMD 64-bit  | `Linux` / `x86_64`  | `linux-amd64`  |
-| Linux, ARM 64-bit        | `Linux` / `aarch64` | `linux-arm64`  |
-| macOS, Intel             | `Darwin` / `x86_64` | `macos-amd64`  |
-| macOS, Apple Silicon     | `Darwin` / `arm64`  | `macos-arm64`  |
+| Your platform           | Archive                    |
+| ----------------------- | -------------------------- |
+| Linux, Intel/AMD 64-bit | `...-linux-amd64.tar.gz`   |
+| Linux, ARM 64-bit       | `...-linux-arm64.tar.gz`   |
+| macOS, Intel            | `...-macos-amd64.tar.gz`   |
+| macOS, Apple Silicon    | `...-macos-arm64.tar.gz`   |
+| Windows, 64-bit         | `...-windows-amd64.zip`    |
+
+On Linux/macOS `uname -sm` tells you OS/arch (`x86_64` -> amd64, `aarch64`/`arm64`
+-> arm64).
+
+### Linux / macOS
 
 ```bash
-# Choose your version and the arch suffix from the table above
-VERSION=v0.1.0
-ARCH=linux-amd64
+VERSION=v0.1.1
+ARCH=linux-amd64        # or linux-arm64 / macos-amd64 / macos-arm64
 BASE="https://github.com/idesyatov/linux-audit-mcp/releases/download/$VERSION"
 
-# Download the archive and the checksums
 curl -LO "$BASE/linux-audit-mcp-$VERSION-$ARCH.tar.gz"
 curl -LO "$BASE/SHA256SUMS"
-
-# Verify, extract, install
 sha256sum --ignore-missing -c SHA256SUMS
 tar xzf "linux-audit-mcp-$VERSION-$ARCH.tar.gz"
 sudo install "linux-audit-mcp-$VERSION-$ARCH/linux-audit-mcp" /usr/local/bin/
 linux-audit-mcp --version
 ```
+
+### Windows (PowerShell)
+
+```powershell
+$Version = "v0.1.1"
+$Base = "https://github.com/idesyatov/linux-audit-mcp/releases/download/$Version"
+
+Invoke-WebRequest "$Base/linux-audit-mcp-$Version-windows-amd64.zip" -OutFile audit.zip
+Invoke-WebRequest "$Base/SHA256SUMS" -OutFile SHA256SUMS
+# Compare this hash against the windows line in SHA256SUMS:
+Get-FileHash audit.zip -Algorithm SHA256
+Expand-Archive audit.zip -DestinationPath .
+.\linux-audit-mcp-$Version-windows-amd64\linux-audit-mcp.exe --version
+```
+
+Windows 10/11 already ships the OpenSSH client the auditor needs. Put the `.exe`
+on your `PATH` (e.g. a folder listed in `%PATH%`).
 
 ### From source (Docker — no Rust on the host)
 
@@ -109,8 +156,8 @@ make build-release            # binary at target/release/linux-audit-mcp
 cargo build --release         # binary at target/release/linux-audit-mcp
 ```
 
-> The auditor runs `ssh` as a subprocess, so the machine you run it from needs an
-> OpenSSH client on its `PATH`.
+> On Linux/macOS the auditor runs `ssh` as a subprocess, so an OpenSSH client
+> must be on `PATH` (preinstalled on most systems; on Windows it's built in).
 
 </details>
 
@@ -211,6 +258,70 @@ the High findings."* The model calls `run_audit` with `{ "target": "web",
 
 `run_audit` only accepts a target **alias** — a prompt-injected model can neither
 choose an arbitrary host nor point at an arbitrary key.
+
+</details>
+
+<details>
+<summary><b>Run via Docker</b></summary>
+
+An image is published to the GitHub Container Registry from the `v0.1.1` release:
+`ghcr.io/idesyatov/linux-audit-mcp` (`linux/amd64`; tags `:vX.Y.Z` and `:latest`).
+It's built to be safe to run: a fully static binary on a minimal Alpine base with
+only an SSH client, runs as a **non-root** user, and contains **no keys** — you
+mount the key at run time. (Apple Silicon and other arm64 hosts run it under
+emulation; a native arm64 image may be added later.)
+
+**Claude Desktop (MCP), hardened** — `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "linux-audit": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--read-only", "--tmpfs", "/home/audit/.ssh:uid=10001",
+        "-v", "/home/you/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro",
+        "-v", "/home/you/.ssh/audit_ed25519:/keys/id_ed25519:ro",
+        "-e", "LINUX_AUDIT_CONFIG=/config/targets.toml",
+        "ghcr.io/idesyatov/linux-audit-mcp@sha256:<digest>"
+      ]
+    }
+  }
+}
+```
+
+**CLI** (same mounts; append the `audit` subcommand and its flags):
+
+```bash
+docker run -i --rm \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --read-only --tmpfs /home/audit/.ssh:uid=10001 \
+  -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
+  -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
+  -e LINUX_AUDIT_CONFIG=/config/targets.toml \
+  ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web --fail-on high
+```
+
+Notes:
+
+- **`identity_file` in `targets.toml` is the in-container path** (e.g.
+  `/keys/id_ed25519`), matching the `-v` mount — not a host path.
+- **Mount only the one audit key** (`:ro`), never your whole `~/.ssh`. Use a
+  dedicated least-privilege key that only reaches the unprivileged `auditor`
+  account on your hosts.
+- The container runs as uid `10001`; the mounted key must be readable by it and
+  `600` (OpenSSH rejects group/world-readable keys). On Linux add
+  `--user "$(id -u)"` and mount a key you own; Docker Desktop emulates this.
+- **Pin by digest** (`@sha256:...`) instead of `:latest`, and verify the
+  cosign (keyless) signature attached in CI:
+
+  ```bash
+  cosign verify ghcr.io/idesyatov/linux-audit-mcp:v0.1.1 \
+    --certificate-identity-regexp '^https://github.com/idesyatov/linux-audit-mcp' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
 
 </details>
 

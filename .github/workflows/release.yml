@@ -1,7 +1,7 @@
 name: Release
 
-# Cross-compile for Linux (x86_64, aarch64) and macOS (x86_64, arm64) and
-# publish the artifacts to a GitHub Release on a `v*` tag.
+# Cross-compile for Linux (x86_64, aarch64), Windows (x86_64) and macOS
+# (x86_64, arm64) and publish the artifacts to a GitHub Release on a `v*` tag.
 on:
   push:
     tags:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  # Linux targets are built in the same image as dev/CI.
+  # Linux and Windows targets are built in the same image as dev/CI.
   build-in-docker:
     runs-on: ubuntu-latest
     strategy:
@@ -20,8 +20,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             name: linux-amd64
+            ext: ""
+            archive: tar.gz
           - target: aarch64-unknown-linux-gnu
             name: linux-arm64
+            ext: ""
+            archive: tar.gz
+          - target: x86_64-pc-windows-gnu
+            name: windows-amd64
+            ext: ".exe"
+            archive: zip
     steps:
       - uses: actions/checkout@v4
 
@@ -41,14 +49,20 @@ jobs:
           TAG=${GITHUB_REF#refs/tags/}
           DIR=linux-audit-mcp-${TAG}-${{ matrix.name }}
           mkdir -p "$DIR"
-          cp target/${{ matrix.target }}/release/linux-audit-mcp "$DIR"/
+          cp target/${{ matrix.target }}/release/linux-audit-mcp${{ matrix.ext }} "$DIR"/
           cp LICENSE README.md "$DIR"/
-          tar czf "${DIR}.tar.gz" "$DIR"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r "${DIR}.zip" "$DIR"
+            echo "ASSET=${DIR}.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "${DIR}.tar.gz" "$DIR"
+            echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: linux-audit-mcp-*.tar.gz
+          path: ${{ env.ASSET }}
 
   # Cross-building macOS from a Linux image is impractical (needs osxcross+SDK),
   # so we use a native macOS runner.
@@ -96,12 +110,59 @@ jobs:
           path: artifacts
 
       - name: Checksums
-        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS
+        run: cd artifacts && sha256sum linux-audit-mcp-*.tar.gz linux-audit-mcp-*.zip > SHA256SUMS
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/*.tar.gz
+            artifacts/*.zip
             artifacts/SHA256SUMS
           generate_release_notes: true
+
+  # Build and publish the runtime container image (linux/amd64) to GHCR, then
+  # sign it with cosign (keyless, via the job's OIDC token). arm64 can be added
+  # later; Apple Silicon runs the amd64 image under emulation meanwhile.
+  docker:
+    needs: build-in-docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          provenance: true
+          sbom: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign the pushed image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${DIGEST}"
