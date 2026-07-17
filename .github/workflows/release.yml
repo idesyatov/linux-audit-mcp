@@ -95,8 +95,13 @@ jobs:
           merge-multiple: true
           path: artifacts
 
+      - name: Checksums
+        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
           generate_release_notes: true

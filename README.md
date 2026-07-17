@@ -70,19 +70,30 @@ linux-audit-mcp audit --target web
 ### From a release (recommended)
 
 Prebuilt archives are on the [Releases](https://github.com/idesyatov/linux-audit-mcp/releases)
-page. Pick the one for the machine you'll **run the auditor from** (not the
-target):
+page. Install on the machine you'll **run the auditor from** (not the target).
+Not sure which file? Run `uname -sm` and match the table:
 
-| Platform            | Archive                                       |
-| ------------------- | --------------------------------------------- |
-| Linux x86_64        | `linux-audit-mcp-vX.Y.Z-linux-amd64.tar.gz`   |
-| Linux aarch64 (ARM) | `linux-audit-mcp-vX.Y.Z-linux-arm64.tar.gz`   |
-| macOS x86_64        | `linux-audit-mcp-vX.Y.Z-macos-amd64.tar.gz`   |
-| macOS arm64 (Apple) | `linux-audit-mcp-vX.Y.Z-macos-arm64.tar.gz`   |
+| Your platform            | `uname -s` / `-m`   | Archive suffix |
+| ------------------------ | ------------------- | -------------- |
+| Linux, Intel/AMD 64-bit  | `Linux` / `x86_64`  | `linux-amd64`  |
+| Linux, ARM 64-bit        | `Linux` / `aarch64` | `linux-arm64`  |
+| macOS, Intel             | `Darwin` / `x86_64` | `macos-amd64`  |
+| macOS, Apple Silicon     | `Darwin` / `arm64`  | `macos-arm64`  |
 
 ```bash
-tar xzf linux-audit-mcp-vX.Y.Z-linux-amd64.tar.gz
-sudo install linux-audit-mcp-vX.Y.Z-linux-amd64/linux-audit-mcp /usr/local/bin/
+# Choose your version and the arch suffix from the table above
+VERSION=v0.1.0
+ARCH=linux-amd64
+BASE="https://github.com/idesyatov/linux-audit-mcp/releases/download/$VERSION"
+
+# Download the archive and the checksums
+curl -LO "$BASE/linux-audit-mcp-$VERSION-$ARCH.tar.gz"
+curl -LO "$BASE/SHA256SUMS"
+
+# Verify, extract, install
+sha256sum --ignore-missing -c SHA256SUMS
+tar xzf "linux-audit-mcp-$VERSION-$ARCH.tar.gz"
+sudo install "linux-audit-mcp-$VERSION-$ARCH/linux-audit-mcp" /usr/local/bin/
 linux-audit-mcp --version
 ```
 
