@@ -5,10 +5,19 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 
-Read-only security audit for Linux servers, over SSH. It connects with a key you
-provide, snapshots the host's configuration using only a curated set of read-only
-commands, and reports findings with a weighted 0–100 score. Run it from the CLI
-(cron/CI) or as an MCP server so an assistant like Claude can audit a host on ask.
+**An MCP server that audits Linux servers over SSH** — so an AI assistant like
+Claude can check a host on request. The *same* read-only audit also runs as a
+plain **CLI**, for a quick terminal report or a cron/CI gate.
+
+It connects with a key you provide, snapshots the host's configuration using only
+a curated set of read-only commands, and reports findings with a weighted 0–100
+score.
+
+> **New to MCP?** The Model Context Protocol is the open standard AI apps use to
+> call external tools. Running this as an MCP server lets Claude Desktop/Code
+> invoke the audit itself — you ask in chat, it audits and explains. Prefer a
+> plain command and a printed report? The CLI does the same audit, no AI involved.
+> Same tool, two front-ends; Docker is just a way to package either one.
 
 ```text
 Audit of 'web' [baseline]: score 53/100 (10 passed, 10 failed, 0 errored)
@@ -74,15 +83,18 @@ docker run -i --rm \
 
 ### Which way is for me?
 
-| I want to…                                | Use                                                       |
-| ----------------------------------------- | --------------------------------------------------------- |
-| Check a host now, or on a schedule (cron) | the CLI above — flags & exit-code gates in **Usage**      |
-| Audit hosts by chatting with **Claude**   | the MCP server — **Usage** (binary) or **Run via Docker** |
-| **Gate CI/CD** on findings                | the CLI with `--fail-on` / `--fail-under` (**Usage**)     |
+First pick the **front-end** (what you want), then the **packaging** (binary or
+Docker — same result):
 
-**Binary or Docker?** Same result. If you already run Docker, `docker run`
-installs nothing; otherwise grab the binary. For Claude, Docker is the most
-portable.
+| I want to…                                | Front-end → section                                       |
+| ----------------------------------------- | --------------------------------------------------------- |
+| Check a host now, or on a schedule (cron) | CLI → **Use it as a CLI**                                 |
+| Audit hosts by chatting with **Claude**   | MCP server → **Use it as an MCP server**                  |
+| **Gate CI/CD** on findings                | CLI with `--fail-on` / `--fail-under` → **Use it as a CLI** |
+
+**Binary or Docker?** If you already run Docker, `docker run` installs nothing;
+otherwise grab the binary. For Claude, Docker is the most portable. Container
+details (mounts, hardening, verifying the signature) are under **Docker image**.
 
 <details>
 <summary><b>Installation</b></summary>
@@ -175,12 +187,21 @@ Standard tools are expected on the target: `sshd_config`, `getent`, `sysctl`,
 </details>
 
 <details>
-<summary><b>Usage (CLI &amp; MCP)</b></summary>
+<summary><b>Use it as a CLI</b></summary>
 
-**CLI** (cron / CI):
+A one-off report in your terminal (also for cron / CI). Run the native binary — or
+the exact same command inside the container:
 
 ```bash
+# native binary
 linux-audit-mcp audit --target web [OPTIONS]
+
+# ...or via Docker (mounts + hardened flags: see "Docker image")
+docker run -i --rm \
+  -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
+  -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
+  -e LINUX_AUDIT_CONFIG=/config/targets.toml \
+  ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web [OPTIONS]
 ```
 
 | Option         | Description                                                          |
@@ -192,14 +213,23 @@ linux-audit-mcp audit --target web [OPTIONS]
 | `--fail-on`    | Exit 2 if any failed check is ≥ this severity. `off` disables. Default `high`. |
 | `--fail-under` | Exit 2 if the total score is below this value (0–100).              |
 
-Exit codes: `0` clean · `1` error · `2` a gate tripped. Example gate:
+Exit codes: `0` clean · `1` error · `2` a gate tripped. Example CI gate:
 
 ```bash
 linux-audit-mcp audit --target web --format json --fail-on high --fail-under 70
 ```
 
-**MCP server** (native binary). With no subcommand it's an MCP stdio server with
-tools `ping` and `run_audit`. In Claude Desktop's `claude_desktop_config.json`:
+</details>
+
+<details>
+<summary><b>Use it as an MCP server (Claude Desktop / Code)</b></summary>
+
+Run with **no subcommand** and the binary becomes an MCP stdio server exposing the
+tools `ping` and `run_audit`. Claude then invokes the audit itself — you ask in
+chat, it audits and explains. Register it in `claude_desktop_config.json`, as a
+native binary **or** via Docker (same result):
+
+Native binary:
 
 ```json
 {
@@ -212,24 +242,7 @@ tools `ping` and `run_audit`. In Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-Then ask, e.g. *"Run a hardened audit of `web` and summarise the High findings."*
-For running the server as a container instead, see **Run via Docker**.
-
-</details>
-
-<details>
-<summary><b>Run via Docker</b></summary>
-
-Image: `ghcr.io/idesyatov/linux-audit-mcp` (`linux/amd64`; tags `:X.Y.Z` and
-`:latest`, Docker-style without the `v`). Static binary on a minimal Alpine base
-with only an SSH client, runs **non-root**, contains **no keys** — you mount the
-key at run time. Apple Silicon / arm64 run it under emulation for now.
-
-Two rules for the config: `identity_file` is the **in-container** path (matching
-your `-v` mount, e.g. `/keys/id_ed25519`), and you mount **only the one audit
-key** `:ro` — never your whole `~/.ssh`.
-
-**Claude Desktop (MCP), hardened** — `claude_desktop_config.json`:
+Docker (portable; mounts + hardened flags explained under **Docker image**):
 
 ```json
 {
@@ -250,12 +263,43 @@ key** `:ro` — never your whole `~/.ssh`.
 }
 ```
 
-The container runs as uid `10001`; the mounted key must be readable by it and
-`600` (OpenSSH rejects group/world-readable keys). On Linux add `--user "$(id -u)"`
-and mount a key you own; Docker Desktop emulates this.
+Then ask, e.g. *"Run a hardened audit of `web` and summarise the High findings."*
+The model calls `run_audit { "target": "web" }` and gets the text + JSON report.
+`run_audit` only accepts a target **alias** — a prompt-injected model can't point
+it at another host or key.
 
-**Pin by digest** (`@sha256:...`) rather than `:latest`, and verify the cosign
-(keyless) signature attached by CI:
+</details>
+
+<details>
+<summary><b>Docker image</b></summary>
+
+`ghcr.io/idesyatov/linux-audit-mcp` (`linux/amd64`; tags `:X.Y.Z` and `:latest`,
+Docker-style without the `v`). This is **the same binary in a container** — it runs
+either front-end (CLI or MCP) shown above; Docker is packaging, not a separate
+mode. It's a static binary on a minimal Alpine base with only an SSH client, runs
+**non-root**, and contains **no keys**. (Apple Silicon / arm64 run it under
+emulation for now.)
+
+Every run mounts two things, read-only:
+
+- **config** → `-v ...targets.toml:/config/targets.toml:ro` plus
+  `-e LINUX_AUDIT_CONFIG=/config/targets.toml`
+- **your SSH key** → `-v ...audit_ed25519:/keys/id_ed25519:ro`. In `targets.toml`,
+  `identity_file` must be that **in-container** path. Mount only the one audit key,
+  never your whole `~/.ssh`.
+
+Recommended hardening flags (used in the configs above):
+
+```text
+--cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs /home/audit/.ssh:uid=10001
+```
+
+The container runs as uid `10001`; the key must be readable by it and `600`
+(OpenSSH rejects group/world-readable keys). On Linux add `--user "$(id -u)"` and
+mount a key you own; Docker Desktop emulates this.
+
+Pin by digest (`@sha256:...`) instead of `:latest`, and verify the cosign (keyless)
+signature CI attaches:
 
 ```bash
 cosign verify ghcr.io/idesyatov/linux-audit-mcp:0.1.1 \
