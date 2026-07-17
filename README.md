@@ -114,28 +114,26 @@ page — or use the Docker image (see **Run via Docker**), or build from source.
 **Linux / macOS** (`uname -sm` tells you OS/arch):
 
 ```bash
-VERSION=v0.1.1
 ARCH=linux-amd64        # or linux-arm64 / macos-amd64 / macos-arm64
-BASE="https://github.com/idesyatov/linux-audit-mcp/releases/download/$VERSION"
+BASE="https://github.com/idesyatov/linux-audit-mcp/releases/latest/download"
 
-curl -LO "$BASE/linux-audit-mcp-$VERSION-$ARCH.tar.gz"
+curl -LO "$BASE/linux-audit-mcp-$ARCH.tar.gz"
 curl -LO "$BASE/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS
-tar xzf "linux-audit-mcp-$VERSION-$ARCH.tar.gz"
-sudo install "linux-audit-mcp-$VERSION-$ARCH/linux-audit-mcp" /usr/local/bin/
+tar xzf "linux-audit-mcp-$ARCH.tar.gz"
+sudo install "linux-audit-mcp-$ARCH/linux-audit-mcp" /usr/local/bin/
 linux-audit-mcp --version
 ```
 
 **Windows** (PowerShell):
 
 ```powershell
-$Version = "v0.1.1"
-$Base = "https://github.com/idesyatov/linux-audit-mcp/releases/download/$Version"
-Invoke-WebRequest "$Base/linux-audit-mcp-$Version-windows-amd64.zip" -OutFile audit.zip
+$Base = "https://github.com/idesyatov/linux-audit-mcp/releases/latest/download"
+Invoke-WebRequest "$Base/linux-audit-mcp-windows-amd64.zip" -OutFile audit.zip
 Invoke-WebRequest "$Base/SHA256SUMS" -OutFile SHA256SUMS
 Get-FileHash audit.zip -Algorithm SHA256   # compare with the windows line in SHA256SUMS
 Expand-Archive audit.zip -DestinationPath .
-.\linux-audit-mcp-$Version-windows-amd64\linux-audit-mcp.exe --version
+.\linux-audit-mcp-windows-amd64\linux-audit-mcp.exe --version
 ```
 
 **From source** (no Rust needed — builds in Docker):
@@ -252,10 +250,11 @@ Docker (portable; mounts + hardened flags explained under **Docker image**):
       "args": [
         "run", "-i", "--rm",
         "--cap-drop=ALL", "--security-opt=no-new-privileges",
-        "--read-only", "--tmpfs", "/home/audit/.ssh:uid=10001",
+        "--read-only", "--tmpfs", "/tmp:uid=10001",
         "-v", "/home/you/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro",
         "-v", "/home/you/.ssh/audit_ed25519:/keys/id_ed25519:ro",
         "-e", "LINUX_AUDIT_CONFIG=/config/targets.toml",
+        "-e", "HOME=/tmp",
         "ghcr.io/idesyatov/linux-audit-mcp@sha256:<digest>"
       ]
     }
@@ -288,21 +287,25 @@ Every run mounts two things, read-only:
   `identity_file` must be that **in-container** path. Mount only the one audit key,
   never your whole `~/.ssh`.
 
+A key bind-mounted from Windows/macOS shows up world-readable (0777), which ssh
+would normally reject. The tool copies it to a private `0600` file inside the
+container before use, so a plain `-v key:...:ro` mount **just works** — you don't
+manage key permissions.
+
 Recommended hardening flags (used in the configs above):
 
 ```text
---cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs /home/audit/.ssh:uid=10001
+--cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs /tmp:uid=10001 -e HOME=/tmp
 ```
 
-The container runs as uid `10001`; the key must be readable by it and `600`
-(OpenSSH rejects group/world-readable keys). On Linux add `--user "$(id -u)"` and
-mount a key you own; Docker Desktop emulates this.
+Runs **non-root** (uid `10001`). Under `--read-only` the `--tmpfs /tmp` gives the
+secured key copy — and, via `HOME=/tmp`, `known_hosts` — a writable place to live.
 
 Pin by digest (`@sha256:...`) instead of `:latest`, and verify the cosign (keyless)
 signature CI attaches:
 
 ```bash
-cosign verify ghcr.io/idesyatov/linux-audit-mcp:0.1.1 \
+cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
   --certificate-identity-regexp '^https://github.com/idesyatov/linux-audit-mcp' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
