@@ -21,6 +21,13 @@ use tokio::time::timeout;
 
 use crate::catalog::{self, CatalogError};
 
+/// Prepended to the remote command's `PATH`. A non-interactive SSH session's
+/// PATH usually omits `/sbin` and `/usr/sbin`, where some read-only tools live
+/// (`sysctl` everywhere; `ss` on RHEL-family). This is a fixed, trusted literal
+/// — it never carries user input, so it can't widen the read-only guarantee
+/// (which is still enforced on the bare command by [`catalog`]).
+const REMOTE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin";
+
 /// `ssh -o StrictHostKeyChecking=<mode>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrictHostKey {
@@ -185,8 +192,9 @@ impl SshConfig {
         // an option; both fields are also charset-validated in `run`.
         args.push(format!("{}@{}", self.user, self.host));
 
-        // The command is a single argv element handed to the remote shell.
-        args.push(command.to_string());
+        // The command is a single argv element handed to the remote shell, with
+        // a sane PATH prepended so sbin tools resolve under non-interactive SSH.
+        args.push(format!("PATH={REMOTE_PATH} {command}"));
 
         args
     }
@@ -264,9 +272,12 @@ mod tests {
         assert!(joined.contains("PasswordAuthentication=no"));
         assert!(joined.contains("ConnectTimeout=10"));
         assert!(joined.contains("StrictHostKeyChecking=accept-new"));
-        // Destination and command are the last two argv elements.
+        // Destination and command are the last two argv elements; the command
+        // carries a prepended PATH so sbin tools resolve over SSH.
         assert_eq!(args[args.len() - 2], "auditor@192.168.1.10");
-        assert_eq!(args[args.len() - 1], "uname -a");
+        let cmd = &args[args.len() - 1];
+        assert!(cmd.starts_with("PATH=/usr/local/sbin:"));
+        assert!(cmd.ends_with(" uname -a"));
     }
 
     #[test]
