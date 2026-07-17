@@ -12,7 +12,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -152,15 +152,78 @@ fn is_valid_user(user: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
+/// A private 0600 copy of an identity file that removes itself on drop.
+struct SecuredIdentity {
+    path: PathBuf,
+}
+
+impl SecuredIdentity {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SecuredIdentity {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn temp_key_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("linux-audit-mcp-key-{pid}-{n}"))
+}
+
+/// ssh refuses a private key that group/other can access — exactly how a key
+/// bind-mounted into a container looks (0777 on Docker Desktop). If `path` is
+/// too open, return a private 0600 copy to use instead; otherwise `None` (use
+/// the original). Windows governs key access by ACLs, so there it's a no-op.
+#[cfg(unix)]
+fn secure_identity(path: &Path) -> std::io::Result<Option<SecuredIdentity>> {
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        // Missing/unreadable: let ssh report it rather than second-guess here.
+        Err(_) => return Ok(None),
+    };
+    if meta.mode() & 0o077 == 0 {
+        return Ok(None);
+    }
+
+    let data = std::fs::read(path)?;
+    let dst = temp_key_path();
+    // O_CREAT | O_EXCL with mode 0600: nobody can pre-create or read the copy.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&dst)?;
+    f.write_all(&data)?;
+
+    Ok(Some(SecuredIdentity { path: dst }))
+}
+
+#[cfg(not(unix))]
+fn secure_identity(_path: &Path) -> std::io::Result<Option<SecuredIdentity>> {
+    Ok(None)
+}
+
 impl SshConfig {
     /// Build the `ssh` argv (without the leading `ssh`). Pure and testable.
-    pub fn build_args(&self, command: &str) -> Vec<String> {
+    /// `identity` is the key to pass to `-i` (may be a secured copy of
+    /// `self.identity_file`; see [`secure_identity`]).
+    pub fn build_args(&self, identity: Option<&Path>, command: &str) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
 
         args.push("-p".to_string());
         args.push(self.port.to_string());
 
-        if let Some(key) = &self.identity_file {
+        if let Some(key) = identity {
             args.push("-i".to_string());
             args.push(key.display().to_string());
             // With an explicit key, don't fall back to other identities.
@@ -212,8 +275,20 @@ impl SshConfig {
         }
         catalog::validate(command).map_err(SshError::CommandRejected)?;
 
+        // If the key's permissions are too open (e.g. a 0777 bind-mount inside a
+        // container), use a private 0600 copy so ssh accepts it. `secured` lives
+        // until the command finishes, then deletes the copy on drop.
+        let secured = match &self.identity_file {
+            Some(path) => secure_identity(path).map_err(SshError::Io)?,
+            None => None,
+        };
+        let identity = secured
+            .as_ref()
+            .map(SecuredIdentity::path)
+            .or(self.identity_file.as_deref());
+
         let mut cmd = Command::new("ssh");
-        cmd.args(self.build_args(command))
+        cmd.args(self.build_args(identity, command))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -264,7 +339,7 @@ mod tests {
 
     #[test]
     fn build_args_sets_safe_defaults() {
-        let args = cfg().build_args("uname -a");
+        let args = cfg().build_args(None, "uname -a");
         let joined = args.join(" ");
 
         assert!(joined.contains("-p 22"));
@@ -284,10 +359,37 @@ mod tests {
     fn build_args_includes_identity_when_set() {
         let mut c = cfg();
         c.identity_file = Some(PathBuf::from("/keys/id_ed25519"));
-        let args = c.build_args("sysctl -a");
+        let args = c.build_args(c.identity_file.as_deref(), "sysctl -a");
         let joined = args.join(" ");
         assert!(joined.contains("-i /keys/id_ed25519"));
         assert!(joined.contains("IdentitiesOnly=yes"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secures_a_too_open_identity() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let src = std::env::temp_dir().join(format!("laudit-keytest-{}", std::process::id()));
+        std::fs::write(&src, b"KEYDATA").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        // Too open -> a private 0600 copy with the same content.
+        let secured = secure_identity(&src)
+            .unwrap()
+            .expect("an open key should be copied");
+        let copy = secured.path().to_path_buf();
+        assert_eq!(std::fs::metadata(&copy).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&copy).unwrap(), b"KEYDATA");
+
+        // Already private -> used as-is (no copy).
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(secure_identity(&src).unwrap().is_none());
+
+        // The copy is removed on drop.
+        drop(secured);
+        assert!(!copy.exists());
+        std::fs::remove_file(&src).ok();
     }
 
     #[test]
