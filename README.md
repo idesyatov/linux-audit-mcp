@@ -61,7 +61,7 @@ docker run --rm ghcr.io/idesyatov/linux-audit-mcp:latest --version   # needs onl
 [targets.web]
 host = "203.0.113.10"
 user = "auditor"                        # unprivileged account on the target
-identity_file = "~/.ssh/audit_ed25519"  # your key; for Docker use "/keys/id_ed25519"
+identity_file = "~/.ssh/audit_ed25519"  # your SSH private key (same for native & Docker)
 ```
 
 The target just needs an unprivileged `auditor` user reachable by your key — see
@@ -77,7 +77,6 @@ linux-audit-mcp audit --target web
 docker run -i --rm \
   -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
   -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
-  -e LINUX_AUDIT_CONFIG=/config/targets.toml \
   ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web
 ```
 
@@ -166,6 +165,9 @@ command_timeout_secs = 30        # default 30
 profile = "hardened"             # optional: baseline (default) | hardened
 ```
 
+`$LINUX_AUDIT_IDENTITY_FILE`, if set, overrides `identity_file` for every target
+— the Docker recipe uses it so `targets.toml` needs no in-container paths.
+
 ### Preparing a target host
 
 The audit is read-only and unprivileged — no `sudoers` entry needed. On the host
@@ -198,7 +200,6 @@ linux-audit-mcp audit --target web [OPTIONS]
 docker run -i --rm \
   -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
   -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
-  -e LINUX_AUDIT_CONFIG=/config/targets.toml \
   ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web [OPTIONS]
 ```
 
@@ -249,18 +250,20 @@ Docker (portable; mounts + hardened flags explained under **Docker image**):
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
-        "--cap-drop=ALL", "--security-opt=no-new-privileges",
-        "--read-only", "--tmpfs", "/tmp:uid=10001",
         "-v", "/home/you/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro",
         "-v", "/home/you/.ssh/audit_ed25519:/keys/id_ed25519:ro",
-        "-e", "LINUX_AUDIT_CONFIG=/config/targets.toml",
-        "-e", "HOME=/tmp",
-        "ghcr.io/idesyatov/linux-audit-mcp@sha256:<digest>"
+        "ghcr.io/idesyatov/linux-audit-mcp:latest"
       ]
     }
   }
 }
 ```
+
+Just the two mounts — the image sets `LINUX_AUDIT_CONFIG`, `LINUX_AUDIT_IDENTITY_FILE`
+and `HOME` by convention (see **Docker image**), so `targets.toml` stays
+host-portable. To harden, insert `"--cap-drop=ALL", "--security-opt=no-new-privileges",
+"--read-only", "--tmpfs", "/tmp",` after `"--rm",`, and pin `@sha256:<digest>`
+instead of `:latest`.
 
 Then ask, e.g. *"Run a hardened audit of `web` and summarise the High findings."*
 The model calls `run_audit { "target": "web" }` and gets the text + JSON report.
@@ -279,27 +282,30 @@ mode. It's a static binary on a minimal Alpine base with only an SSH client, run
 **non-root**, and contains **no keys**. (Apple Silicon / arm64 run it under
 emulation for now.)
 
-Every run mounts two things, read-only:
+Just mount two things read-only — the image sets the rest by convention, so
+`targets.toml` stays **host-portable** (no in-container paths in it):
 
-- **config** → `-v ...targets.toml:/config/targets.toml:ro` plus
-  `-e LINUX_AUDIT_CONFIG=/config/targets.toml`
-- **your SSH key** → `-v ...audit_ed25519:/keys/id_ed25519:ro`. In `targets.toml`,
-  `identity_file` must be that **in-container** path. Mount only the one audit key,
-  never your whole `~/.ssh`.
+- **config** → `-v ...targets.toml:/config/targets.toml:ro` (the image's
+  `LINUX_AUDIT_CONFIG` points here).
+- **your SSH key** → `-v ...audit_ed25519:/keys/id_ed25519:ro` (the image's
+  `LINUX_AUDIT_IDENTITY_FILE` overrides the config's `identity_file` with this
+  path, so you keep a normal `~/.ssh/...` value in `targets.toml`). Mount only the
+  one audit key, never your whole `~/.ssh`.
 
 A key bind-mounted from Windows/macOS shows up world-readable (0777), which ssh
 would normally reject. The tool copies it to a private `0600` file inside the
-container before use, so a plain `-v key:...:ro` mount **just works** — you don't
-manage key permissions.
+container before use, so the plain `:ro` mount **just works** — you don't manage
+key permissions. `HOME=/tmp` (also set in the image) gives that copy and
+`known_hosts` a writable home.
 
-Recommended hardening flags (used in the configs above):
+Optional hardening flags — add to `docker run` (or the args list):
 
 ```text
---cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs /tmp:uid=10001 -e HOME=/tmp
+--cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs /tmp
 ```
 
-Runs **non-root** (uid `10001`). Under `--read-only` the `--tmpfs /tmp` gives the
-secured key copy — and, via `HOME=/tmp`, `known_hosts` — a writable place to live.
+Runs **non-root** (uid `10001`). Under `--read-only`, the `--tmpfs /tmp` keeps the
+secured key copy and `known_hosts` writable.
 
 Pin by digest (`@sha256:...`) instead of `:latest`, and verify the cosign (keyless)
 signature CI attaches:

@@ -78,11 +78,18 @@ impl From<StrictHostKeyMode> for StrictHostKey {
 
 impl Target {
     pub fn to_ssh_config(&self) -> SshConfig {
+        // `$LINUX_AUDIT_IDENTITY_FILE` overrides the key path for every target so
+        // the config file stays host-portable: the Docker recipe points the tool
+        // at the in-container mount via this env var, without editing targets.toml.
+        let identity_file = match std::env::var_os("LINUX_AUDIT_IDENTITY_FILE") {
+            Some(p) => Some(PathBuf::from(p)),
+            None => self.identity_file.as_deref().map(expand_tilde),
+        };
         SshConfig {
             host: self.host.clone(),
             port: self.port,
             user: self.user.clone(),
-            identity_file: self.identity_file.as_deref().map(expand_tilde),
+            identity_file,
             connect_timeout: Duration::from_secs(self.connect_timeout_secs),
             command_timeout: Duration::from_secs(self.command_timeout_secs),
             strict_host_key: self.strict_host_key.into(),
@@ -203,5 +210,26 @@ mod tests {
             cfg.target("nope"),
             Err(ConfigError::UnknownTarget(_))
         ));
+    }
+
+    #[test]
+    fn identity_file_env_override() {
+        let cfg: Config = toml::from_str(
+            "[targets.web]\nhost = \"1.1.1.1\"\nidentity_file = \"~/.ssh/audit_ed25519\"",
+        )
+        .unwrap();
+        let web = cfg.target("web").unwrap();
+
+        // No env: the config's own (tilde-expanded) path is used.
+        std::env::remove_var("LINUX_AUDIT_IDENTITY_FILE");
+        assert!(web.to_ssh_config().identity_file.is_some());
+
+        // Env set: it overrides, so the config stays host-portable.
+        std::env::set_var("LINUX_AUDIT_IDENTITY_FILE", "/keys/id_ed25519");
+        assert_eq!(
+            web.to_ssh_config().identity_file,
+            Some(PathBuf::from("/keys/id_ed25519"))
+        );
+        std::env::remove_var("LINUX_AUDIT_IDENTITY_FILE");
     }
 }
