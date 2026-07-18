@@ -98,7 +98,8 @@ from the score.
 | `main.rs`        | Wires modules; routes CLI (no subcommand → `serve`, `audit`/`health` → one-shot).|
 | `server.rs`      | MCP stdio server; tools `ping`, `run_audit`, `inspect_load` (target **alias**).  |
 | `cli.rs`         | `audit`/`health` subcommands: flags, `--format`, exit-code gates.                |
-| `config.rs`      | Operator target registry (`targets.toml`); alias → `SshConfig`.                 |
+| `config.rs`      | Operator inventory (`targets.toml`): targets + groups; `resolve(alias)` merges host/group/default vars; `group_members`. |
+| `run.rs`         | Fan-out: run audit/health over one target or a group's members concurrently; per-host error capture; group text/JSON rendering. |
 | `ssh.rs`         | SSH transport via `tokio::process`; key-only, timeouts; validates then sends.   |
 | `catalog.rs`     | 🔒 Read-only command allowlist + charset filter. The core safety boundary.      |
 | `audit.rs`       | Runs each distinct command once (cached), then `evaluate()` → findings (pure).  |
@@ -123,11 +124,11 @@ model driving it — to change a host or reach one it shouldn't:
   happens in `ssh.rs::run` *before* any process is spawned. A fixed, trusted
   `PATH=…` prefix is added to the wire command so `sbin` tools resolve; it never
   carries user input, so it can't widen what's allowed.
-- **Connection safety (`config.rs`).** Tool/CLI arguments take a target **alias**,
-  never a host or key path. Connection details live only in the operator-owned
-  config, so the model cannot point the auditor at an arbitrary host (SSRF) or
-  key. Host and user strings are charset-validated so they can't inject `ssh`
-  options.
+- **Connection safety (`config.rs`).** Tool/CLI arguments take a target **alias**
+  or a **group** name, never a host or key path. Connection details live only in
+  the operator-owned config, so the model cannot point the auditor at an arbitrary
+  host (SSRF) or key. Host and user strings are charset-validated so they can't
+  inject `ssh` options. Groups only expand to aliases already in the config.
 
 Auditing stays unprivileged: the catalog contains only commands an ordinary user
 can run against world-readable config. Anything needing root is intentionally

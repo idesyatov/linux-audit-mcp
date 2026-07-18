@@ -84,7 +84,7 @@ pub struct HealthReport {
 
 /// Thresholds for turning raw readings into `Ok`/`Warn`/`Crit`. Each field has a
 /// sensible default; a target may override any subset via `[targets.x.health]`.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Thresholds {
     /// 1-minute load average per core.

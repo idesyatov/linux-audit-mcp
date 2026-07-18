@@ -12,6 +12,7 @@ mod cli;
 mod config;
 mod health;
 mod report;
+mod run;
 mod scoring;
 mod server;
 mod ssh;

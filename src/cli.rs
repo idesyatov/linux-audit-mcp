@@ -1,23 +1,26 @@
-//! Command-line interface for the `audit` subcommand (cron/CI use).
+//! Command-line interface for the `audit` and `health` subcommands (cron/CI use).
 //!
 //! The default (no subcommand) is the MCP stdio server, so existing clients
-//! that launch the bare binary keep working.
+//! that launch the bare binary keep working. Each subcommand targets a single
+//! host (`--target`) or a whole group (`--group`, fanned out concurrently).
 
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::checks::{Finding, Severity, Status};
+use crate::config::{self, Config};
 use crate::health::{self, HealthStatus};
-use crate::scoring::{self, Profile, Score};
-use crate::{audit, config, report};
+use crate::report;
+use crate::run::{self, AuditOutcome, HealthOutcome};
+use crate::scoring::{Profile, Score};
 
 #[derive(Parser)]
 #[command(
     name = "linux-audit-mcp",
     version,
-    about = "Read-only Linux server security audit"
+    about = "Read-only security audit and operational-health checks for Linux servers"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -28,17 +31,22 @@ pub struct Cli {
 pub enum Command {
     /// Run the MCP server over stdio (this is also the default with no subcommand).
     Serve,
-    /// Audit a configured target and print a report (for cron/CI).
+    /// Audit a configured target or group and print a report (for cron/CI).
     Audit(AuditArgs),
-    /// Take an operational-health snapshot of a configured target (for cron/CI).
+    /// Take an operational-health snapshot of a target or group (for cron/CI).
     Health(HealthArgs),
 }
 
 #[derive(Args)]
+#[command(group(ArgGroup::new("audit_sel").required(true).args(["target", "group"])))]
 pub struct AuditArgs {
     /// Target alias defined in the operator config.
     #[arg(long)]
-    target: String,
+    target: Option<String>,
+
+    /// Group name from the config; audits every member (or `all` for every target).
+    #[arg(long)]
+    group: Option<String>,
 
     /// Override the target's audit profile.
     #[arg(long)]
@@ -62,10 +70,15 @@ pub struct AuditArgs {
 }
 
 #[derive(Args)]
+#[command(group(ArgGroup::new("health_sel").required(true).args(["target", "group"])))]
 pub struct HealthArgs {
     /// Target alias defined in the operator config.
     #[arg(long)]
-    target: String,
+    target: Option<String>,
+
+    /// Group name from the config; snapshots every member (or `all` for every target).
+    #[arg(long)]
+    group: Option<String>,
 
     /// Output format.
     #[arg(long, value_enum, default_value = "text")]
@@ -114,7 +127,29 @@ impl FailOn {
     }
 }
 
-/// Exit code from the gates: 2 if either gate trips, else 0.
+fn load_config(path: &Option<PathBuf>) -> anyhow::Result<Config> {
+    match path {
+        Some(path) => config::load_from(path),
+        None => config::load(),
+    }
+    .context("loading target config")
+}
+
+/// Expand a `--target`/`--group` selection into aliases plus the group name (if
+/// any). Clap guarantees exactly one of the two is set.
+fn select(
+    cfg: &Config,
+    target: Option<&str>,
+    group: Option<&str>,
+) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    match (target, group) {
+        (Some(t), None) => Ok((vec![t.to_string()], None)),
+        (None, Some(g)) => Ok((cfg.group_members(g)?, Some(g.to_string()))),
+        _ => anyhow::bail!("exactly one of --target or --group is required"),
+    }
+}
+
+/// Single-host severity/score gate: 2 if either trips, else 0.
 fn exit_code(score: &Score, findings: &[Finding], fail_on: FailOn, fail_under: Option<u8>) -> i32 {
     let severity_gate = fail_on.min_severity().is_some_and(|min| {
         findings
@@ -129,35 +164,55 @@ fn exit_code(score: &Score, findings: &[Finding], fail_on: FailOn, fail_under: O
     }
 }
 
-/// Run an audit and print the report. Returns the process exit code.
-pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
-    let cfg = match &args.config {
-        Some(path) => config::load_from(path),
-        None => config::load(),
+/// Group exit code: a tripped gate (2) dominates; else an unreachable host (1);
+/// else clean (0).
+fn audit_exit(outcomes: &[AuditOutcome], fail_on: FailOn, fail_under: Option<u8>) -> i32 {
+    let gate = outcomes
+        .iter()
+        .any(|o| matches!(&o.result, Ok((s, f)) if exit_code(s, f, fail_on, fail_under) == 2));
+    let errored = outcomes.iter().any(|o| o.result.is_err());
+    if gate {
+        2
+    } else if errored {
+        1
+    } else {
+        0
     }
-    .context("loading target config")?;
-
-    let target = cfg.target(&args.target)?;
-
-    let profile = match args.profile.as_deref() {
-        Some(name) => Profile::parse(name).with_context(|| format!("unknown profile {name:?}"))?,
-        None => target.profile.unwrap_or_default(),
-    };
-
-    let findings = audit::run_audit(&target.to_ssh_config())
-        .await
-        .context("running audit")?;
-    let score = scoring::score(&findings, profile);
-
-    match args.format {
-        Format::Text => print!("{}", report::text(&args.target, &score, &findings)),
-        Format::Json => println!("{}", report::json(&args.target, &score, &findings)?),
-    }
-
-    Ok(exit_code(&score, &findings, args.fail_on, args.fail_under))
 }
 
-/// Exit code for the health gate: 2 if `overall` meets `fail_on`, else 0.
+/// Run the audit against a target or group and print the report.
+pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
+    let cfg = load_config(&args.config)?;
+    let profile_override = match args.profile.as_deref() {
+        Some(name) => {
+            Some(Profile::parse(name).with_context(|| format!("unknown profile {name:?}"))?)
+        }
+        None => None,
+    };
+    let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
+    let outcomes = run::audit_targets(&cfg, &aliases, profile_override).await?;
+
+    match &group {
+        None => {
+            let o = &outcomes[0];
+            match &o.result {
+                Ok((score, findings)) => match args.format {
+                    Format::Text => print!("{}", report::text(&o.alias, score, findings)),
+                    Format::Json => println!("{}", report::json(&o.alias, score, findings)?),
+                },
+                Err(e) => eprintln!("audit of '{}' failed: {e}", o.alias),
+            }
+        }
+        Some(g) => match args.format {
+            Format::Text => print!("{}", run::audit_group_text(g, &outcomes)),
+            Format::Json => println!("{}", run::audit_group_json(g, &outcomes)?),
+        },
+    }
+
+    Ok(audit_exit(&outcomes, args.fail_on, args.fail_under))
+}
+
+/// Single-host health gate: 2 if `overall` meets `fail_on`, else 0.
 fn health_exit_code(overall: HealthStatus, fail_on: FailOnStatus) -> i32 {
     let trips = match fail_on {
         FailOnStatus::Off => false,
@@ -171,26 +226,44 @@ fn health_exit_code(overall: HealthStatus, fail_on: FailOnStatus) -> i32 {
     }
 }
 
-/// Take a health snapshot and print the report. Returns the process exit code.
+fn health_exit(outcomes: &[HealthOutcome], fail_on: FailOnStatus) -> i32 {
+    let gate = outcomes
+        .iter()
+        .any(|o| matches!(&o.result, Ok(r) if health_exit_code(r.overall, fail_on) == 2));
+    let errored = outcomes.iter().any(|o| o.result.is_err());
+    if gate {
+        2
+    } else if errored {
+        1
+    } else {
+        0
+    }
+}
+
+/// Take a health snapshot of a target or group and print the report.
 pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
-    let cfg = match &args.config {
-        Some(path) => config::load_from(path),
-        None => config::load(),
+    let cfg = load_config(&args.config)?;
+    let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
+    let outcomes = run::health_targets(&cfg, &aliases).await?;
+
+    match &group {
+        None => {
+            let o = &outcomes[0];
+            match &o.result {
+                Ok(report) => match args.format {
+                    Format::Text => print!("{}", health::report::text(&o.alias, report)),
+                    Format::Json => println!("{}", health::report::json(&o.alias, report)?),
+                },
+                Err(e) => eprintln!("health snapshot of '{}' failed: {e}", o.alias),
+            }
+        }
+        Some(g) => match args.format {
+            Format::Text => print!("{}", run::health_group_text(g, &outcomes)),
+            Format::Json => println!("{}", run::health_group_json(g, &outcomes)?),
+        },
     }
-    .context("loading target config")?;
 
-    let target = cfg.target(&args.target)?;
-
-    let report = health::collect(&target.to_ssh_config(), &target.health)
-        .await
-        .context("collecting health snapshot")?;
-
-    match args.format {
-        Format::Text => print!("{}", health::report::text(&args.target, &report)),
-        Format::Json => println!("{}", health::report::json(&args.target, &report)?),
-    }
-
-    Ok(health_exit_code(report.overall, args.fail_on_status))
+    Ok(health_exit(&outcomes, args.fail_on_status))
 }
 
 #[cfg(test)]
@@ -212,15 +285,32 @@ mod tests {
     }
 
     #[test]
-    fn parses_audit_subcommand() {
-        let cli = Cli::try_parse_from(["linux-audit-mcp", "audit", "--target", "web"]).unwrap();
-        match cli.command {
+    fn parses_audit_target_and_group() {
+        let a = Cli::try_parse_from(["linux-audit-mcp", "audit", "--target", "web"]).unwrap();
+        match a.command {
             Some(Command::Audit(a)) => {
-                assert_eq!(a.target, "web");
+                assert_eq!(a.target.as_deref(), Some("web"));
+                assert!(a.group.is_none());
                 assert!(matches!(a.fail_on, FailOn::High)); // secure default
             }
             _ => panic!("expected audit subcommand"),
         }
+        let g = Cli::try_parse_from(["linux-audit-mcp", "audit", "--group", "mtproto"]).unwrap();
+        match g.command {
+            Some(Command::Audit(a)) => assert_eq!(a.group.as_deref(), Some("mtproto")),
+            _ => panic!("expected audit subcommand"),
+        }
+    }
+
+    #[test]
+    fn target_and_group_are_mutually_exclusive() {
+        // Neither -> error.
+        assert!(Cli::try_parse_from(["linux-audit-mcp", "audit"]).is_err());
+        // Both -> error.
+        assert!(
+            Cli::try_parse_from(["linux-audit-mcp", "audit", "--target", "a", "--group", "b"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -256,11 +346,36 @@ mod tests {
     }
 
     #[test]
+    fn group_exit_prefers_gate_then_error() {
+        let clean = AuditOutcome {
+            alias: "a".into(),
+            result: Ok((score(&[], Profile::Baseline), vec![])),
+        };
+        let failing = AuditOutcome {
+            alias: "b".into(),
+            result: Ok((
+                score(&[finding(Severity::High, Status::Fail)], Profile::Baseline),
+                vec![finding(Severity::High, Status::Fail)],
+            )),
+        };
+        let errored = AuditOutcome {
+            alias: "c".into(),
+            result: Err("connection failed".into()),
+        };
+        // gate (2) dominates even with an errored host present.
+        assert_eq!(
+            audit_exit(std::slice::from_ref(&failing), FailOn::High, None),
+            2
+        );
+        assert_eq!(audit_exit(&[clean, errored], FailOn::High, None), 1);
+    }
+
+    #[test]
     fn parses_health_subcommand() {
         let cli = Cli::try_parse_from(["linux-audit-mcp", "health", "--target", "web"]).unwrap();
         match cli.command {
             Some(Command::Health(a)) => {
-                assert_eq!(a.target, "web");
+                assert_eq!(a.target.as_deref(), Some("web"));
                 assert!(matches!(a.fail_on_status, FailOnStatus::Off)); // cron-friendly default
             }
             _ => panic!("expected health subcommand"),

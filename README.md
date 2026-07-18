@@ -5,19 +5,24 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 
-**An MCP server that audits Linux servers over SSH** — so an AI assistant like
-Claude can check a host on request. The *same* read-only audit also runs as a
-plain **CLI**, for a quick terminal report or a cron/CI gate.
+**Read-only checks for Linux servers, over SSH — in two modes:**
 
-It connects with a key you provide, snapshots the host's configuration using only
-a curated set of read-only commands, and reports findings with a weighted 0–100
-score.
+- 🛡️ **Security audit** — a weighted **0–100 hardening score** with concrete fixes.
+  Run it when you set up or change a host.
+- 📈 **Operational health** — a live **load / memory / disk / network** snapshot of
+  one host or your **whole fleet** (host groups), flagged `OK`/`WARN`/`CRIT`. Run it
+  on a schedule to keep a pulse on every server.
 
-> **New to MCP?** The Model Context Protocol is the open standard AI apps use to
-> call external tools. Running this as an MCP server lets Claude Desktop/Code
-> invoke the audit itself — you ask in chat, it audits and explains. Prefer a
-> plain command and a printed report? The CLI does the same audit, no AI involved.
-> Same tool, two front-ends; Docker is just a way to package either one.
+Run either from your terminal, in cron/CI, or let **Claude** run it for you (it's an
+MCP server). It connects with an SSH key you provide and issues only a curated set of
+read-only commands, so it **cannot change the host**.
+
+> **New to MCP?** The Model Context Protocol lets AI apps call external tools — as
+> an MCP server, Claude Desktop/Code runs the checks itself and explains the result
+> ("audit web", "is anything under load?"). Prefer a plain command? The CLI does the
+> same, no AI involved. Same tool, two front-ends; Docker just packages either one.
+
+**Audit** — one host's security posture:
 
 ```text
 Audit of 'web' [baseline]: score 53/100 (10 passed, 10 failed, 0 errored)
@@ -28,56 +33,76 @@ Audit of 'web' [baseline]: score 53/100 (10 passed, 10 failed, 0 errored)
   ...
 ```
 
+**Health** — a live pulse across a whole group (`--group prod`):
+
+```text
+Health group 'prod' (3 hosts): 2 OK, 1 WARN, 0 CRIT, 0 error
+=== db [WARN] ===
+Health of 'db': WARN (operational, not a security score)
+  [OK  ] health-load          0.30 per core (1m 0.30, 5m 0.28, 15m 0.25 over 4 core(s))
+  [WARN] health-disk          88% on / (/ 88%, /data 55%)
+  [OK  ] health-net-throughput ens3 rx 1.20 / tx 0.40 MiB/s
+  ...
+```
+
 ## Features
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
-  curated catalog; the tool *cannot* change the host.
-- **No agent, least privilege** — just SSH as an unprivileged user, using tools
-  already on the box (`sshd_config`, `sysctl`, `ss`, `systemctl`, …).
-- **20 checks across 7 domains** — ssh, accounts, kernel, firewall, updates,
-  services, logging — each with a severity and a concrete fix.
-- **Weighted 0–100 score** with `baseline` / `hardened` profiles.
-- **Operational-health snapshot** — a separate `inspect_load` / `health` command
-  reports load, memory, disk, hot processes and connections as `OK`/`WARN`/`CRIT`
-  against thresholds. Kept **out** of the security score (workload isn't a
-  vulnerability); read-only, same catalog and target aliases.
-- **Two ways to run** — a CLI with exit-code gates for cron/CI, or an MCP server
-  for Claude Desktop/Code. Text and JSON output.
-- **Safe by design** — arguments take a target *alias*, never a host or key, so a
-  prompt-injected model can't redirect the connection.
+  curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
+- **Security audit** — 20 checks across 7 domains (ssh, accounts, kernel, firewall,
+  updates, services, logging), each with a severity and a concrete fix, rolled up
+  into a weighted **0–100 score** with `baseline` / `hardened` profiles.
+- **Operational health** — a separate snapshot of load, memory, disk, hot processes,
+  connections and per-interface **network throughput** as `OK`/`WARN`/`CRIT`. Kept
+  **out** of the security score (workload isn't a vulnerability).
+- **Host groups** — Ansible-style inventory with shared vars; audit or snapshot a
+  whole group concurrently.
+- **Safe by design** — tools take a target *alias* or *group*, never a raw host or
+  key, so a prompt-injected model can't redirect the connection.
 
-## Quick Start
+## Quick start
 
-Most people want the same thing first: **a one-off security report for a host
-(say, a VPS), from the terminal.** That's the path below — auditing from Claude or
-gating CI reuse the very same config (see the table after).
+The fastest path — **Docker, nothing to install** — in three steps. *(Prefer a
+native binary? See **Installation** below. Want **Claude** to run it? See **Use it
+as an MCP server**.)*
 
-**1. Get the tool.** Install a native binary (see **Installation**) — or just use
-Docker, which needs nothing installed. Check it runs:
+Check it runs:
 
 ```bash
 docker run --pull always --rm ghcr.io/idesyatov/linux-audit-mcp:latest --version
 ```
 
-**2. Describe the target** in `~/.config/linux-audit-mcp/targets.toml`:
+### 1 · Prepare the target host
+
+Once, on the server you want to audit — create an unprivileged user reachable by
+your SSH key. The audit is read-only, so **no `sudo`/root is needed**:
+
+```bash
+sudo useradd -m -s /bin/bash auditor
+sudo -u auditor mkdir -p /home/auditor/.ssh
+echo "ssh-ed25519 AAAA... you@laptop" | sudo tee -a /home/auditor/.ssh/authorized_keys
+sudo chmod 700 /home/auditor/.ssh && sudo chmod 600 /home/auditor/.ssh/authorized_keys
+sudo chown -R auditor:auditor /home/auditor/.ssh
+```
+
+### 2 · Configure the target
+
+In `~/.config/linux-audit-mcp/targets.toml` — one block per host:
 
 ```toml
 [targets.web]
-host = "203.0.113.10"
-user = "auditor"                        # unprivileged account on the target
-identity_file = "~/.ssh/audit_ed25519"  # your SSH private key (same for native & Docker)
+host = "203.0.113.10"                     # your server's IP or hostname
+user = "auditor"                          # the unprivileged account from step 1
+identity_file = "~/.ssh/audit_ed25519"    # your SSH private key
 ```
 
-The target just needs an unprivileged `auditor` user reachable by your key — see
-**Configuration** to set that up.
+That's the whole minimum. Timeouts, profiles, health thresholds and **host
+groups** are all optional — see **Configuration**.
 
-**3. Run the audit** by alias — native binary:
+### 3 · Run it
 
-```bash
-linux-audit-mcp audit --target web
-```
-
-...or via Docker (`--pull always` keeps the image current):
+Mount the config and key read-only, then run either mode by alias. **Audit** a
+host's security posture:
 
 ```bash
 docker run --pull always --rm \
@@ -86,27 +111,31 @@ docker run --pull always --rm \
   ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web
 ```
 
-### Which way is for me?
+...or take a live **health** snapshot — of one host, or your **whole fleet** with
+`--group` (same two mounts):
 
-First pick the **front-end** (what you want), then the **packaging** (binary or
-Docker — same result):
+```bash
+docker run --pull always --rm \
+  -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
+  -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
+  ghcr.io/idesyatov/linux-audit-mcp:latest health --group all
+```
 
-| I want to…                                | Front-end → section                                       |
-| ----------------------------------------- | --------------------------------------------------------- |
-| Check a host now, or on a schedule (cron) | CLI → **Use it as a CLI**                                 |
-| Audit hosts by chatting with **Claude**   | MCP server → **Use it as an MCP server**                  |
-| **Gate CI/CD** on findings                | CLI with `--fail-on` / `--fail-under` → **Use it as a CLI** |
+**That's it.** From here:
 
-**Binary or Docker?** If you already run Docker, `docker run` installs nothing;
-otherwise grab the binary. For Claude, Docker is the most portable. Container
-details (mounts, hardening, verifying the signature) are under **Docker image**.
+- **Keep a pulse on the fleet** — run the health command from cron with
+  `--fail-on-status warn`; it exits non-zero (alert-friendly) the moment any host
+  crosses a threshold.
+- **CI / JSON** — `--format json` plus gates (`--fail-on` / `--fail-under` for
+  audit) → see **Use it as a CLI**.
+- **Chat with Claude** — run either mode as an **MCP server** (see below).
 
 <details>
 <summary><b>Installation</b></summary>
 
 Install on the machine you'll **run the auditor from** (not the target). Prebuilt,
 signed archives are on the [Releases](https://github.com/idesyatov/linux-audit-mcp/releases)
-page — or use the Docker image (see **Run via Docker**), or build from source.
+page — or use the Docker image (see **Docker image**), or build from source.
 
 | Platform                | Archive                    |
 | ----------------------- | -------------------------- |
@@ -174,6 +203,40 @@ profile = "hardened"             # optional: baseline (default) | hardened
 `$LINUX_AUDIT_IDENTITY_FILE`, if set, overrides `identity_file` for every target
 — the Docker recipe uses it so `targets.toml` needs no in-container paths.
 
+### Groups (Ansible-style inventory)
+
+Group hosts to audit or snapshot them all at once. A `[groups.<name>]` lists
+`members` (target aliases) and may carry **shared vars** its members inherit, so
+common settings live in one place:
+
+```toml
+[groups.mtproto]
+user = "root"                         # inherited by every member
+identity_file = "~/.ssh/audit_ed25519"
+profile = "hardened"
+members = ["web", "mt2", "mt3"]
+
+[groups.mtproto.health]               # optional group-wide thresholds
+la_per_core_warn = 2.0
+
+[targets.web]
+host = "203.0.113.10"                 # only what's unique per host
+
+[targets.mt2]
+host = "203.0.113.11"
+
+[targets.mt3]
+host = "203.0.113.12"
+user = "audit"                        # override just for this host
+```
+
+Precedence per field: **host value → group value → built-in default**. A host
+inheriting the same field from two groups with different values is a config error
+(set it on the host to disambiguate). Run against a group with `--group mtproto`
+(CLI) or `{ "group": "mtproto" }` (MCP); the implicit **`all`** group is every
+target. Hosts in a group run **concurrently**, and one unreachable host doesn't
+sink the rest — it's reported as an error line in the group report.
+
 Optional per-target thresholds for the `health` / `inspect_load` snapshot (any
 subset; omitted keys use the defaults shown):
 
@@ -197,19 +260,10 @@ top_n = 5                 # hot processes listed per resource
 
 ### Preparing a target host
 
-The audit is read-only and unprivileged — no `sudoers` entry needed. On the host
-you want to audit:
-
-```bash
-sudo useradd -m -s /bin/bash auditor
-sudo -u auditor mkdir -p /home/auditor/.ssh
-echo "ssh-ed25519 AAAA... you@laptop" | sudo tee -a /home/auditor/.ssh/authorized_keys
-sudo chmod 700 /home/auditor/.ssh && sudo chmod 600 /home/auditor/.ssh/authorized_keys
-sudo chown -R auditor:auditor /home/auditor/.ssh
-```
-
-Standard tools are expected on the target: `sshd_config`, `getent`, `sysctl`,
-`ss`, `systemctl`, and (Debian/Ubuntu) `apt-get`.
+Create the unprivileged `auditor` user reachable by your key — see **Quick start ›
+step 1**. No `sudoers` entry is needed (the audit is read-only). Standard tools are
+expected on the target: `sshd_config`, `getent`, `sysctl`, `ss`, `systemctl`,
+`uptime`, `free`, `df`, `ps`, and (Debian/Ubuntu) `apt-get`.
 
 </details>
 
@@ -233,12 +287,16 @@ docker run --rm \
 
 | Option         | Description                                                          |
 | -------------- | ------------------------------------------------------------------- |
-| `--target`     | Target alias from the config (required).                            |
+| `--target`     | Single target alias (this **or** `--group`).                        |
+| `--group`      | Group name — audits every member concurrently (or `all`).           |
 | `--profile`    | `baseline` \| `hardened` — overrides the target's profile.          |
 | `--format`     | `text` (default) \| `json`.                                         |
 | `--config`     | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |
 | `--fail-on`    | Exit 2 if any failed check is ≥ this severity. `off` disables. Default `high`. |
 | `--fail-under` | Exit 2 if the total score is below this value (0–100).              |
+
+For a group, exit code is the strongest signal across hosts: a tripped gate (2)
+dominates, else an unreachable host (1), else clean (0).
 
 Exit codes: `0` clean · `1` error · `2` a gate tripped. Example CI gate:
 
@@ -258,7 +316,8 @@ linux-audit-mcp health --target web            # text (default) or --format json
 
 | Option            | Description                                                     |
 | ----------------- | -------------------------------------------------------------- |
-| `--target`        | Target alias from the config (required).                       |
+| `--target`        | Single target alias (this **or** `--group`).                   |
+| `--group`         | Group name — snapshots every member concurrently (or `all`).   |
 | `--format`        | `text` (default) \| `json`.                                    |
 | `--config`        | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default). |
 | `--fail-on-status`| Exit 2 when overall status is at least `warn` / `crit`. `off` (default) never gates. |
@@ -316,9 +375,10 @@ instead of `:latest`.
 
 Then ask, e.g. *"Run a hardened audit of `web` and summarise the High findings."*
 The model calls `run_audit { "target": "web" }` and gets the text + JSON report.
-Or *"Is `web` under load right now?"* → `inspect_load { "target": "web" }`. Both
-tools only accept a target **alias** — a prompt-injected model can't point them at
-another host or key.
+Or *"Is `web` under load right now?"* → `inspect_load { "target": "web" }`, or for
+a whole group *"Check load on all mtproto hosts"* → `inspect_load { "group":
+"mtproto" }`. Both tools accept only a target **alias** or a **group** name from
+the config — a prompt-injected model can't point them at another host or key.
 
 </details>
 

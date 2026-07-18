@@ -1,9 +1,14 @@
-//! Operator-owned registry of audit targets.
+//! Operator-owned inventory of audit targets and host groups.
 //!
 //! Sensitive connection details (host, user, key) live here - in a file the
-//! operator controls - never in MCP tool arguments. The `run_audit` tool only
-//! accepts a target *alias*, so a (possibly prompt-injected) model can neither
-//! choose an arbitrary host (SSRF) nor point at an arbitrary key file.
+//! operator controls - never in MCP tool arguments. The tools accept only a
+//! target *alias* or a *group* name, so a (possibly prompt-injected) model can
+//! neither choose an arbitrary host (SSRF) nor point at an arbitrary key file.
+//!
+//! Inventory model (Ansible-inspired): a `[groups.<name>]` lists `members`
+//! (target aliases) and may carry shared vars that its members inherit. Per
+//! field, precedence is host value -> group value -> built-in default; a host
+//! inheriting the same field from two groups with different values is an error.
 //!
 //! Path: `$LINUX_AUDIT_CONFIG`, else `~/.config/linux-audit-mcp/targets.toml`.
 
@@ -15,6 +20,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::health::Thresholds;
 use crate::scoring::Profile;
 use crate::ssh::{SshConfig, StrictHostKey};
 
@@ -22,45 +28,55 @@ use crate::ssh::{SshConfig, StrictHostKey};
 pub struct Config {
     #[serde(default)]
     pub targets: HashMap<String, Target>,
+    #[serde(default)]
+    pub groups: HashMap<String, Group>,
+}
+
+/// Connection/audit settings shared by targets and groups. Every field is
+/// optional so "unset" is distinct from "default", which is what lets a group
+/// value fill in for a host that didn't set it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HostVars {
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub identity_file: Option<PathBuf>,
+    pub strict_host_key: Option<StrictHostKeyMode>,
+    pub connect_timeout_secs: Option<u64>,
+    pub command_timeout_secs: Option<u64>,
+    pub profile: Option<Profile>,
+    pub health: Option<Thresholds>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Target {
     pub host: String,
-    #[serde(default = "default_port")]
+    #[serde(flatten)]
+    pub vars: HostVars,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Group {
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(flatten)]
+    pub vars: HostVars,
+}
+
+/// A target with every field resolved (host + inherited group vars + defaults).
+#[derive(Debug)]
+pub struct ResolvedTarget {
+    pub host: String,
     pub port: u16,
-    #[serde(default = "default_user")]
     pub user: String,
-    #[serde(default)]
     pub identity_file: Option<PathBuf>,
-    #[serde(default)]
     pub strict_host_key: StrictHostKeyMode,
-    #[serde(default = "default_connect_secs")]
     pub connect_timeout_secs: u64,
-    #[serde(default = "default_command_secs")]
     pub command_timeout_secs: u64,
-    /// Default audit profile for this target; overridable per `run_audit` call.
-    #[serde(default)]
     pub profile: Option<Profile>,
-    /// Operational-health thresholds for `inspect_load` (own defaults if omitted).
-    #[serde(default)]
-    pub health: crate::health::Thresholds,
+    pub health: Thresholds,
 }
 
-fn default_port() -> u16 {
-    22
-}
-fn default_user() -> String {
-    "auditor".to_string()
-}
-fn default_connect_secs() -> u64 {
-    10
-}
-fn default_command_secs() -> u64 {
-    30
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum StrictHostKeyMode {
     Yes,
@@ -79,7 +95,7 @@ impl From<StrictHostKeyMode> for StrictHostKey {
     }
 }
 
-impl Target {
+impl ResolvedTarget {
     pub fn to_ssh_config(&self) -> SshConfig {
         // `$LINUX_AUDIT_IDENTITY_FILE` overrides the key path for every target so
         // the config file stays host-portable: the Docker recipe points the tool
@@ -102,11 +118,118 @@ impl Target {
     }
 }
 
+/// Resolve one field: the host's own value, else the single group value among
+/// the target's groups, else `None`. Two groups disagreeing is an error.
+fn inherit<T: PartialEq + Clone>(
+    own: Option<T>,
+    groups: &[(&String, &Group)],
+    pick: impl Fn(&HostVars) -> Option<T>,
+    field: &str,
+    alias: &str,
+) -> Result<Option<T>, ConfigError> {
+    if own.is_some() {
+        return Ok(own);
+    }
+    let mut found: Option<T> = None;
+    for (_, g) in groups {
+        if let Some(v) = pick(&g.vars) {
+            match &found {
+                None => found = Some(v),
+                Some(existing) if *existing != v => {
+                    return Err(ConfigError::ConflictingGroupVar {
+                        target: alias.to_string(),
+                        field: field.to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(found)
+}
+
 impl Config {
-    pub fn target(&self, alias: &str) -> Result<&Target, ConfigError> {
-        self.targets
+    /// Resolve a target alias into effective settings (host + group vars + defaults).
+    pub fn resolve(&self, alias: &str) -> Result<ResolvedTarget, ConfigError> {
+        let target = self
+            .targets
             .get(alias)
-            .ok_or_else(|| ConfigError::UnknownTarget(alias.to_string()))
+            .ok_or_else(|| ConfigError::UnknownTarget(alias.to_string()))?;
+
+        // Groups this alias belongs to (stable order by group name for messages).
+        let mut groups: Vec<(&String, &Group)> = self
+            .groups
+            .iter()
+            .filter(|(_, g)| g.members.iter().any(|m| m == alias))
+            .collect();
+        groups.sort_by(|a, b| a.0.cmp(b.0));
+
+        let v = &target.vars;
+        Ok(ResolvedTarget {
+            host: target.host.clone(),
+            port: inherit(v.port, &groups, |h| h.port, "port", alias)?.unwrap_or(22),
+            user: inherit(v.user.clone(), &groups, |h| h.user.clone(), "user", alias)?
+                .unwrap_or_else(|| "auditor".to_string()),
+            identity_file: inherit(
+                v.identity_file.clone(),
+                &groups,
+                |h| h.identity_file.clone(),
+                "identity_file",
+                alias,
+            )?,
+            strict_host_key: inherit(
+                v.strict_host_key,
+                &groups,
+                |h| h.strict_host_key,
+                "strict_host_key",
+                alias,
+            )?
+            .unwrap_or_default(),
+            connect_timeout_secs: inherit(
+                v.connect_timeout_secs,
+                &groups,
+                |h| h.connect_timeout_secs,
+                "connect_timeout_secs",
+                alias,
+            )?
+            .unwrap_or(10),
+            command_timeout_secs: inherit(
+                v.command_timeout_secs,
+                &groups,
+                |h| h.command_timeout_secs,
+                "command_timeout_secs",
+                alias,
+            )?
+            .unwrap_or(30),
+            profile: inherit(v.profile, &groups, |h| h.profile, "profile", alias)?,
+            health: inherit(v.health, &groups, |h| h.health, "health", alias)?.unwrap_or_default(),
+        })
+    }
+
+    /// The target aliases in a group, validated. The implicit `all` group (unless
+    /// defined) is every target. Member order is preserved as declared.
+    pub fn group_members(&self, name: &str) -> Result<Vec<String>, ConfigError> {
+        if name == "all" && !self.groups.contains_key("all") {
+            let mut all: Vec<String> = self.targets.keys().cloned().collect();
+            all.sort();
+            return Ok(all);
+        }
+        let group = self
+            .groups
+            .get(name)
+            .ok_or_else(|| ConfigError::UnknownGroup(name.to_string()))?;
+        for m in &group.members {
+            if !self.targets.contains_key(m) {
+                return Err(ConfigError::UnknownMember {
+                    group: name.to_string(),
+                    member: m.clone(),
+                });
+            }
+        }
+        if group.members.is_empty() {
+            return Err(ConfigError::EmptyGroup(name.to_string()));
+        }
+        Ok(group.members.clone())
     }
 }
 
@@ -155,6 +278,16 @@ pub enum ConfigError {
     },
     Parse(toml::de::Error),
     UnknownTarget(String),
+    UnknownGroup(String),
+    EmptyGroup(String),
+    UnknownMember {
+        group: String,
+        member: String,
+    },
+    ConflictingGroupVar {
+        target: String,
+        field: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -165,6 +298,16 @@ impl fmt::Display for ConfigError {
             }
             Self::Parse(e) => write!(f, "invalid config: {e}"),
             Self::UnknownTarget(t) => write!(f, "unknown target {t:?}"),
+            Self::UnknownGroup(g) => write!(f, "unknown group {g:?}"),
+            Self::EmptyGroup(g) => write!(f, "group {g:?} has no members"),
+            Self::UnknownMember { group, member } => {
+                write!(f, "group {group:?} lists unknown target {member:?}")
+            }
+            Self::ConflictingGroupVar { target, field } => write!(
+                f,
+                "target {target:?} inherits conflicting {field:?} from two groups; \
+                 set it on the target to disambiguate"
+            ),
         }
     }
 }
@@ -176,7 +319,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_targets_with_defaults() {
+    fn resolves_targets_with_defaults() {
         let cfg: Config = toml::from_str(
             r#"
             [targets.web]
@@ -192,12 +335,12 @@ mod tests {
         )
         .unwrap();
 
-        let web = cfg.target("web").unwrap();
+        let web = cfg.resolve("web").unwrap();
         assert_eq!(web.port, 22);
         assert_eq!(web.user, "auditor");
         assert_eq!(web.profile, None);
 
-        let db = cfg.target("db").unwrap();
+        let db = cfg.resolve("db").unwrap();
         assert_eq!(db.port, 2222);
         assert_eq!(db.profile, Some(Profile::Hardened));
         let ssh = db.to_ssh_config();
@@ -210,9 +353,150 @@ mod tests {
     fn unknown_target_is_an_error() {
         let cfg: Config = toml::from_str("[targets.web]\nhost = \"1.1.1.1\"").unwrap();
         assert!(matches!(
-            cfg.target("nope"),
+            cfg.resolve("nope"),
             Err(ConfigError::UnknownTarget(_))
         ));
+    }
+
+    #[test]
+    fn group_vars_are_inherited_and_host_overrides() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.mtproto]
+            user = "root"
+            profile = "hardened"
+            members = ["web", "mt2"]
+
+            [targets.web]
+            host = "1.1.1.1"
+
+            [targets.mt2]
+            host = "2.2.2.2"
+            user = "audit"
+            "#,
+        )
+        .unwrap();
+
+        // web inherits user + profile from the group.
+        let web = cfg.resolve("web").unwrap();
+        assert_eq!(web.user, "root");
+        assert_eq!(web.profile, Some(Profile::Hardened));
+
+        // mt2 overrides user, still inherits profile.
+        let mt2 = cfg.resolve("mt2").unwrap();
+        assert_eq!(mt2.user, "audit");
+        assert_eq!(mt2.profile, Some(Profile::Hardened));
+    }
+
+    #[test]
+    fn conflicting_group_vars_error() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.a]
+            user = "root"
+            members = ["web"]
+            [groups.b]
+            user = "audit"
+            members = ["web"]
+            [targets.web]
+            host = "1.1.1.1"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.resolve("web"),
+            Err(ConfigError::ConflictingGroupVar { .. })
+        ));
+
+        // Setting it on the target disambiguates.
+        let cfg2: Config = toml::from_str(
+            r#"
+            [groups.a]
+            user = "root"
+            members = ["web"]
+            [groups.b]
+            user = "audit"
+            members = ["web"]
+            [targets.web]
+            host = "1.1.1.1"
+            user = "ops"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg2.resolve("web").unwrap().user, "ops");
+    }
+
+    #[test]
+    fn group_membership_and_validation() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.mtproto]
+            members = ["web", "mt2"]
+            [targets.web]
+            host = "1.1.1.1"
+            [targets.mt2]
+            host = "2.2.2.2"
+            [targets.other]
+            host = "3.3.3.3"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.group_members("mtproto").unwrap(), vec!["web", "mt2"]);
+        // implicit `all` = every target, sorted.
+        assert_eq!(
+            cfg.group_members("all").unwrap(),
+            vec!["mt2", "other", "web"]
+        );
+        assert!(matches!(
+            cfg.group_members("nope"),
+            Err(ConfigError::UnknownGroup(_))
+        ));
+    }
+
+    #[test]
+    fn group_with_unknown_member_errors() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.g]
+            members = ["web", "ghost"]
+            [targets.web]
+            host = "1.1.1.1"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.group_members("g"),
+            Err(ConfigError::UnknownMember { .. })
+        ));
+    }
+
+    #[test]
+    fn health_thresholds_parse_and_inherit() {
+        // `[targets.x.health]` and `[groups.x.health]` are nested tables inside a
+        // flattened HostVars - guard that serde still routes them correctly.
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.mtproto]
+            members = ["web", "mt2"]
+            [groups.mtproto.health]
+            disk_warn_pct = 70
+
+            [targets.web]
+            host = "1.1.1.1"
+
+            [targets.mt2]
+            host = "2.2.2.2"
+            [targets.mt2.health]
+            disk_warn_pct = 60
+            "#,
+        )
+        .unwrap();
+
+        // web inherits the group's health thresholds.
+        assert_eq!(cfg.resolve("web").unwrap().health.disk_warn_pct, 70);
+        // mt2 overrides with its own.
+        assert_eq!(cfg.resolve("mt2").unwrap().health.disk_warn_pct, 60);
     }
 
     #[test]
@@ -221,7 +505,7 @@ mod tests {
             "[targets.web]\nhost = \"1.1.1.1\"\nidentity_file = \"~/.ssh/audit_ed25519\"",
         )
         .unwrap();
-        let web = cfg.target("web").unwrap();
+        let web = cfg.resolve("web").unwrap();
 
         // No env: the config's own (tilde-expanded) path is used.
         std::env::remove_var("LINUX_AUDIT_IDENTITY_FILE");
