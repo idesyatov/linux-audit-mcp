@@ -143,6 +143,45 @@ pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
         .collect()
 }
 
+/// Cumulative RX/TX byte counters for one interface, from `/proc/net/dev`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetCounters {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// Parse `cat /proc/net/dev` into `iface -> counters`. The two header lines and
+/// the loopback interface are skipped. Columns after the `iface:` are receive
+/// (`bytes` at index 0) then transmit (`bytes` at index 8).
+pub fn parse_net_dev(output: &str) -> std::collections::HashMap<String, NetCounters> {
+    let mut map = std::collections::HashMap::new();
+    for line in output.lines() {
+        let Some((name, rest)) = line.split_once(':') else {
+            continue; // header lines have no colon
+        };
+        let iface = name.trim();
+        if iface.is_empty() || iface == "lo" {
+            continue;
+        }
+        let nums: Vec<u64> = rest
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        // Need at least receive bytes (0) and transmit bytes (8).
+        if nums.len() < 9 {
+            continue;
+        }
+        map.insert(
+            iface.to_string(),
+            NetCounters {
+                rx_bytes: nums[0],
+                tx_bytes: nums[8],
+            },
+        );
+    }
+    map
+}
+
 /// Socket totals from `ss -s`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketSummary {
@@ -256,5 +295,18 @@ mod tests {
         let s = parse_ss_summary(out).unwrap();
         assert_eq!(s.total, 230);
         assert_eq!(s.tcp_estab, 8);
+    }
+
+    #[test]
+    fn net_dev_skips_headers_and_lo() {
+        let out = "Inter-|   Receive                                                |  Transmit\n\
+                   \x20face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+                   \x20   lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0\n\
+                   \x20 eth0: 500000 500 0 0 0 0 0 0 200000 400 0 0 0 0 0 0\n";
+        let m = parse_net_dev(out);
+        assert_eq!(m.len(), 1); // lo dropped
+        let eth0 = m.get("eth0").unwrap();
+        assert_eq!(eth0.rx_bytes, 500_000);
+        assert_eq!(eth0.tx_bytes, 200_000);
     }
 }

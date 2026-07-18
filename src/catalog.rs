@@ -42,6 +42,8 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "df -P",
     "ps -eo pid,comm,pcpu,pmem --sort=-pcpu",
     "ss -s",
+    // Network interface counters; sampled twice to derive throughput.
+    "cat /proc/net/dev",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)

@@ -24,10 +24,18 @@ const FREE: &str = "free -b";
 const DF: &str = "df -P";
 const PS: &str = "ps -eo pid,comm,pcpu,pmem --sort=-pcpu";
 const SS: &str = "ss -s";
+/// Sampled twice (not single-shot) to derive throughput, so it is handled apart
+/// from [`SINGLE_SHOT`] in [`collect`] and produces no metric in [`evaluate`].
+const NETDEV: &str = "cat /proc/net/dev";
 
-/// Every read-only command the health snapshot issues (each must be in the
-/// catalog; see the invariant test).
-pub const HEALTH_COMMANDS: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS];
+/// Commands snapped exactly once per snapshot.
+const SINGLE_SHOT: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS];
+
+/// Every read-only command the health snapshot may issue (each must be in the
+/// catalog; see the invariant test). Consumed only by the invariant test and
+/// evals; the run path uses [`SINGLE_SHOT`] plus [`NETDEV`].
+#[allow(dead_code)]
+pub const HEALTH_COMMANDS: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, NETDEV];
 
 /// A metric's verdict against its thresholds. `Unknown` means the input was
 /// missing or unparseable - it never counts toward the overall status.
@@ -91,6 +99,14 @@ pub struct Thresholds {
     /// Filesystem capacity (percent).
     pub disk_warn_pct: u8,
     pub disk_crit_pct: u8,
+    /// Per-interface network throughput (MiB/s). `0` disables that bound, so
+    /// network is informational (always `Ok`) unless a threshold is set.
+    pub net_rx_warn_mibps: f64,
+    pub net_rx_crit_mibps: f64,
+    pub net_tx_warn_mibps: f64,
+    pub net_tx_crit_mibps: f64,
+    /// Gap between the two `/proc/net/dev` samples, in seconds.
+    pub net_sample_secs: u64,
     /// How many hot processes to list per resource.
     pub top_n: usize,
 }
@@ -106,6 +122,11 @@ impl Default for Thresholds {
             swap_used_crit_pct: 90,
             disk_warn_pct: 85,
             disk_crit_pct: 95,
+            net_rx_warn_mibps: 0.0,
+            net_rx_crit_mibps: 0.0,
+            net_tx_warn_mibps: 0.0,
+            net_tx_crit_mibps: 0.0,
+            net_sample_secs: 1,
             top_n: 5,
         }
     }
@@ -274,8 +295,95 @@ fn network_metric(outputs: &Outputs) -> Metric {
     }
 }
 
+/// Ok/Warn/Crit for one throughput bound; a threshold of `0` disables it.
+fn bound_status(value: f64, warn: f64, crit: f64) -> HealthStatus {
+    if crit > 0.0 && value >= crit {
+        HealthStatus::Crit
+    } else if warn > 0.0 && value >= warn {
+        HealthStatus::Warn
+    } else {
+        HealthStatus::Ok
+    }
+}
+
+/// Per-interface RX/TX throughput from two `/proc/net/dev` samples `dt_secs`
+/// apart. Pure: `collect` does the timing and sampling. Informational unless
+/// the per-direction MiB/s thresholds are set.
+fn net_throughput_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-net-throughput";
+    const TITLE: &str = "Network throughput";
+    if dt_secs <= 0.0 {
+        return unknown(ID, TITLE, "no measurable interval between samples");
+    }
+    let (before, after) = (parse::parse_net_dev(s1), parse::parse_net_dev(s2));
+    if after.is_empty() {
+        return unknown(ID, TITLE, "no interfaces reported");
+    }
+    const MIB: f64 = 1024.0 * 1024.0;
+    // name, rx MiB/s, tx MiB/s - only interfaces seen in both samples and not idle.
+    let mut ifaces: Vec<(String, f64, f64)> = after
+        .iter()
+        .filter_map(|(name, now)| {
+            let prev = before.get(name)?;
+            // saturating: a counter reset (reboot/wrap) yields 0 rather than a spike.
+            let rx = now.rx_bytes.saturating_sub(prev.rx_bytes) as f64 / dt_secs / MIB;
+            let tx = now.tx_bytes.saturating_sub(prev.tx_bytes) as f64 / dt_secs / MIB;
+            if now.rx_bytes == 0 && now.tx_bytes == 0 {
+                return None; // down/unused
+            }
+            Some((name.clone(), rx, tx))
+        })
+        .collect();
+    if ifaces.is_empty() {
+        return unknown(ID, TITLE, "no active interfaces");
+    }
+    // Busiest by combined throughput leads the value line.
+    ifaces.sort_by(|a, b| {
+        (b.1 + b.2)
+            .partial_cmp(&(a.1 + a.2))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let status = ifaces
+        .iter()
+        .map(|(_, rx, tx)| {
+            let r = bound_status(*rx, thr.net_rx_warn_mibps, thr.net_rx_crit_mibps);
+            let t = bound_status(*tx, thr.net_tx_warn_mibps, thr.net_tx_crit_mibps);
+            if r.rank() >= t.rank() {
+                r
+            } else {
+                t
+            }
+        })
+        .max_by_key(|s| s.rank())
+        .unwrap_or(HealthStatus::Ok);
+    let (name, rx, tx) = &ifaces[0];
+    let detail = ifaces
+        .iter()
+        .map(|(n, r, t)| format!("{n} rx {r:.2} tx {t:.2}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: format!("{name} rx {rx:.2} / tx {tx:.2} MiB/s"),
+        detail: format!("MiB/s over {dt_secs:.1}s: {detail}"),
+    }
+}
+
+/// Worst status across metrics (`Unknown` is neutral; `Unknown` overall only if
+/// nothing could be measured).
+fn worst(metrics: &[Metric]) -> HealthStatus {
+    metrics
+        .iter()
+        .map(|m| m.status)
+        .max_by_key(|s| s.rank())
+        .unwrap_or(HealthStatus::Unknown)
+}
+
 /// Build a health report from pre-collected command outputs. Pure (no I/O):
-/// shared by [`collect`] and the evals.
+/// shared by [`collect`] and the evals. Does not include network throughput,
+/// which needs two timed samples (added in [`collect`]).
 pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     let mut metrics = vec![load_metric(outputs, thr)];
     metrics.extend(memory_metrics(outputs, thr));
@@ -292,11 +400,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     });
     let top_mem: Vec<ProcInfo> = by_mem.into_iter().take(thr.top_n).collect();
 
-    let overall = metrics
-        .iter()
-        .map(|m| m.status)
-        .max_by_key(|s| s.rank())
-        .unwrap_or(HealthStatus::Unknown);
+    let overall = worst(&metrics);
 
     HealthReport {
         metrics,
@@ -306,13 +410,14 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     }
 }
 
-/// Snap each health command once over SSH, then evaluate.
+/// Snap each single-shot command once over SSH, sample `/proc/net/dev` twice for
+/// throughput, then evaluate.
 ///
 /// Host-level failures (auth, connection, timeout) abort. A per-command remote
 /// failure becomes an `Unknown` metric for whatever needed it; the rest run.
 pub async fn collect(ssh: &SshConfig, thr: &Thresholds) -> Result<HealthReport, SshError> {
     let mut outputs: Outputs = HashMap::new();
-    for &cmd in HEALTH_COMMANDS {
+    for &cmd in SINGLE_SHOT {
         match ssh.run(cmd).await {
             Ok(out) => {
                 outputs.insert(cmd, Ok(out.stdout));
@@ -326,7 +431,43 @@ pub async fn collect(ssh: &SshConfig, thr: &Thresholds) -> Result<HealthReport, 
             Err(host_level) => return Err(host_level),
         }
     }
-    Ok(evaluate(&outputs, thr))
+
+    let mut report = evaluate(&outputs, thr);
+
+    // Two timed samples of the interface counters -> throughput. A remote error
+    // on either read degrades to an Unknown metric; host-level errors abort.
+    let net = match sample_net(ssh, thr).await? {
+        Some((s1, s2, dt)) => net_throughput_metric(&s1, &s2, dt, thr),
+        None => unknown(
+            "health-net-throughput",
+            "Network throughput",
+            "/proc/net/dev unavailable",
+        ),
+    };
+    report.metrics.push(net);
+    report.overall = worst(&report.metrics);
+    Ok(report)
+}
+
+/// Read `/proc/net/dev` twice, `net_sample_secs` apart, returning both samples
+/// and the elapsed seconds. `Ok(None)` if either read fails remotely.
+async fn sample_net(
+    ssh: &SshConfig,
+    thr: &Thresholds,
+) -> Result<Option<(String, String, f64)>, SshError> {
+    let first = match ssh.run(NETDEV).await {
+        Ok(out) => out.stdout,
+        Err(SshError::RemoteCommand { .. }) => return Ok(None),
+        Err(host_level) => return Err(host_level),
+    };
+    let start = std::time::Instant::now();
+    tokio::time::sleep(std::time::Duration::from_secs(thr.net_sample_secs.max(1))).await;
+    let second = match ssh.run(NETDEV).await {
+        Ok(out) => out.stdout,
+        Err(SshError::RemoteCommand { .. }) => return Ok(None),
+        Err(host_level) => return Err(host_level),
+    };
+    Ok(Some((first, second, start.elapsed().as_secs_f64())))
 }
 
 fn human_bytes(n: u64) -> String {
@@ -402,6 +543,63 @@ mod tests {
                   /dev/sda1 100 99 1 99% /\n";
         let r = evaluate(&outputs(&[("df -P", df)]), &thr);
         assert_eq!(r.overall, HealthStatus::Crit);
+    }
+
+    // rx grows by 2 MiB, tx flat, over the given interface.
+    fn netdev(iface: &str, rx: u64, tx: u64) -> String {
+        format!("Inter-|\n face |\n {iface}: {rx} 5 0 0 0 0 0 0 {tx} 4 0 0 0 0 0 0\n")
+    }
+
+    #[test]
+    fn net_throughput_computes_rate_and_is_informational_by_default() {
+        let thr = Thresholds::default();
+        let s1 = netdev("eth0", 1_000_000, 500_000);
+        let s2 = netdev("eth0", 1_000_000 + 2 * 1024 * 1024, 500_000);
+        let m = net_throughput_metric(&s1, &s2, 1.0, &thr);
+        assert_eq!(m.status, HealthStatus::Ok); // no thresholds set
+        assert!(m.value.contains("eth0 rx 2.00 / tx 0.00"), "{}", m.value);
+    }
+
+    #[test]
+    fn net_throughput_crosses_threshold() {
+        let thr = Thresholds {
+            net_rx_crit_mibps: 1.0,
+            ..Thresholds::default()
+        };
+        let s1 = netdev("eth0", 0, 0);
+        let s2 = netdev("eth0", 2 * 1024 * 1024, 0);
+        assert_eq!(
+            net_throughput_metric(&s1, &s2, 1.0, &thr).status,
+            HealthStatus::Crit
+        );
+    }
+
+    #[test]
+    fn net_throughput_counter_reset_is_not_a_spike() {
+        let thr = Thresholds {
+            net_rx_warn_mibps: 1.0,
+            ..Thresholds::default()
+        };
+        // s2 < s1 (reboot/wrap): saturating delta -> 0, so no false Warn.
+        let s1 = netdev("eth0", 5_000_000, 5_000_000);
+        let s2 = netdev("eth0", 1000, 1000);
+        assert_eq!(
+            net_throughput_metric(&s1, &s2, 1.0, &thr).status,
+            HealthStatus::Ok
+        );
+    }
+
+    #[test]
+    fn net_throughput_unknown_without_data() {
+        let thr = Thresholds::default();
+        assert_eq!(
+            net_throughput_metric("", "", 1.0, &thr).status,
+            HealthStatus::Unknown
+        );
+        assert_eq!(
+            net_throughput_metric(&netdev("eth0", 1, 1), &netdev("eth0", 2, 2), 0.0, &thr).status,
+            HealthStatus::Unknown // no measurable interval
+        );
     }
 
     #[test]

@@ -107,8 +107,8 @@ from the score.
 | `checks/*.rs`    | The 20 checks, grouped by domain; each is a pure `evaluate(output) → Outcome`.  |
 | `scoring.rs`     | Weighted 0–100 score, `baseline`/`hardened` profiles, severity penalties.       |
 | `report.rs`      | Renders findings + score to text and JSON.                                      |
-| `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O) and pure `evaluate()`; no score. |
-| `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s).                            |
+| `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O, incl. 2-sample net) and pure `evaluate()`; no score. |
+| `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s, /proc/net/dev).             |
 | `health/report.rs`| Renders the health snapshot (`OK`/`WARN`/`CRIT`) to text and JSON.              |
 | `evals.rs`       | (test-only) per-distro fixture regression tests (audit **and** health).         |
 
