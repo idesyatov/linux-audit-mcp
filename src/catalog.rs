@@ -35,6 +35,13 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // `-s` (simulate) performs no actions and needs no root - read-only.
     "apt-get -s upgrade",
     "uname -a",
+    // Operational health probes (Stage A): all unprivileged, read-only snapshots.
+    "uptime",
+    "nproc",
+    "free -b",
+    "df -P",
+    "ps -eo pid,comm,pcpu,pmem --sort=-pcpu",
+    "ss -s",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)

@@ -10,6 +10,7 @@ mod catalog;
 mod checks;
 mod cli;
 mod config;
+mod health;
 mod report;
 mod scoring;
 mod server;
@@ -37,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
             0
         }
         cli::Command::Audit(args) => cli::run_audit(args).await?,
+        cli::Command::Health(args) => cli::run_health(args).await?,
     };
 
     std::process::exit(code);

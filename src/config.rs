@@ -42,6 +42,9 @@ pub struct Target {
     /// Default audit profile for this target; overridable per `run_audit` call.
     #[serde(default)]
     pub profile: Option<Profile>,
+    /// Operational-health thresholds for `inspect_load` (own defaults if omitted).
+    #[serde(default)]
+    pub health: crate::health::Thresholds,
 }
 
 fn default_port() -> u16 {

@@ -9,6 +9,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::checks::{Finding, Severity, Status};
+use crate::health::{self, HealthStatus};
 use crate::scoring::{self, Profile, Score};
 use crate::{audit, config, report};
 
@@ -29,6 +30,8 @@ pub enum Command {
     Serve,
     /// Audit a configured target and print a report (for cron/CI).
     Audit(AuditArgs),
+    /// Take an operational-health snapshot of a configured target (for cron/CI).
+    Health(HealthArgs),
 }
 
 #[derive(Args)]
@@ -56,6 +59,32 @@ pub struct AuditArgs {
     /// Exit 2 if the total score is below this value (0-100).
     #[arg(long)]
     fail_under: Option<u8>,
+}
+
+#[derive(Args)]
+pub struct HealthArgs {
+    /// Target alias defined in the operator config.
+    #[arg(long)]
+    target: String,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "text")]
+    format: Format,
+
+    /// Path to the target config (defaults to $LINUX_AUDIT_CONFIG or the standard location).
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Exit 2 when the overall health status is at least this severe (`off` disables).
+    #[arg(long, value_enum, default_value = "off")]
+    fail_on_status: FailOnStatus,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum FailOnStatus {
+    Off,
+    Warn,
+    Crit,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -128,6 +157,42 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
     Ok(exit_code(&score, &findings, args.fail_on, args.fail_under))
 }
 
+/// Exit code for the health gate: 2 if `overall` meets `fail_on`, else 0.
+fn health_exit_code(overall: HealthStatus, fail_on: FailOnStatus) -> i32 {
+    let trips = match fail_on {
+        FailOnStatus::Off => false,
+        FailOnStatus::Warn => matches!(overall, HealthStatus::Warn | HealthStatus::Crit),
+        FailOnStatus::Crit => matches!(overall, HealthStatus::Crit),
+    };
+    if trips {
+        2
+    } else {
+        0
+    }
+}
+
+/// Take a health snapshot and print the report. Returns the process exit code.
+pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
+    let cfg = match &args.config {
+        Some(path) => config::load_from(path),
+        None => config::load(),
+    }
+    .context("loading target config")?;
+
+    let target = cfg.target(&args.target)?;
+
+    let report = health::collect(&target.to_ssh_config(), &target.health)
+        .await
+        .context("collecting health snapshot")?;
+
+    match args.format {
+        Format::Text => print!("{}", health::report::text(&args.target, &report)),
+        Format::Json => println!("{}", health::report::json(&args.target, &report)?),
+    }
+
+    Ok(health_exit_code(report.overall, args.fail_on_status))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +253,32 @@ mod tests {
         let s = score(&findings, Profile::Baseline); // total ~99
         assert_eq!(exit_code(&s, &findings, FailOn::Off, Some(100)), 2);
         assert_eq!(exit_code(&s, &findings, FailOn::Off, Some(50)), 0);
+    }
+
+    #[test]
+    fn parses_health_subcommand() {
+        let cli = Cli::try_parse_from(["linux-audit-mcp", "health", "--target", "web"]).unwrap();
+        match cli.command {
+            Some(Command::Health(a)) => {
+                assert_eq!(a.target, "web");
+                assert!(matches!(a.fail_on_status, FailOnStatus::Off)); // cron-friendly default
+            }
+            _ => panic!("expected health subcommand"),
+        }
+    }
+
+    #[test]
+    fn health_gate() {
+        // off never trips; warn trips on Warn/Crit; crit only on Crit.
+        assert_eq!(health_exit_code(HealthStatus::Crit, FailOnStatus::Off), 0);
+        assert_eq!(health_exit_code(HealthStatus::Warn, FailOnStatus::Warn), 2);
+        assert_eq!(health_exit_code(HealthStatus::Ok, FailOnStatus::Warn), 0);
+        assert_eq!(health_exit_code(HealthStatus::Warn, FailOnStatus::Crit), 0);
+        assert_eq!(health_exit_code(HealthStatus::Crit, FailOnStatus::Crit), 2);
+        // Unknown is neutral - never gates.
+        assert_eq!(
+            health_exit_code(HealthStatus::Unknown, FailOnStatus::Warn),
+            0
+        );
     }
 }

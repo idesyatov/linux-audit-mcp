@@ -1,0 +1,11 @@
+{
+  "description": "debian-default: busy host, load/memory/disk elevated into warn",
+  "metrics": {
+    "health-load": "warn",
+    "health-memory": "warn",
+    "health-swap": "ok",
+    "health-disk": "warn",
+    "health-connections": "ok"
+  },
+  "overall": "warn"
+}

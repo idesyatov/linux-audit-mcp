@@ -1,0 +1,11 @@
+{
+  "description": "ubuntu-hardened: healthy host, everything within thresholds",
+  "metrics": {
+    "health-load": "ok",
+    "health-memory": "ok",
+    "health-swap": "ok",
+    "health-disk": "ok",
+    "health-connections": "ok"
+  },
+  "overall": "ok"
+}

@@ -1,0 +1,11 @@
+{
+  "description": "rocky-minimal: overloaded CPU and near-full root disk push load/disk to crit",
+  "metrics": {
+    "health-load": "crit",
+    "health-memory": "ok",
+    "health-swap": "ok",
+    "health-disk": "crit",
+    "health-connections": "ok"
+  },
+  "overall": "crit"
+}

@@ -37,6 +37,10 @@ Audit of 'web' [baseline]: score 53/100 (10 passed, 10 failed, 0 errored)
 - **20 checks across 7 domains** — ssh, accounts, kernel, firewall, updates,
   services, logging — each with a severity and a concrete fix.
 - **Weighted 0–100 score** with `baseline` / `hardened` profiles.
+- **Operational-health snapshot** — a separate `inspect_load` / `health` command
+  reports load, memory, disk, hot processes and connections as `OK`/`WARN`/`CRIT`
+  against thresholds. Kept **out** of the security score (workload isn't a
+  vulnerability); read-only, same catalog and target aliases.
 - **Two ways to run** — a CLI with exit-code gates for cron/CI, or an MCP server
   for Claude Desktop/Code. Text and JSON output.
 - **Safe by design** — arguments take a target *alias*, never a host or key, so a
@@ -170,6 +174,22 @@ profile = "hardened"             # optional: baseline (default) | hardened
 `$LINUX_AUDIT_IDENTITY_FILE`, if set, overrides `identity_file` for every target
 — the Docker recipe uses it so `targets.toml` needs no in-container paths.
 
+Optional per-target thresholds for the `health` / `inspect_load` snapshot (any
+subset; omitted keys use the defaults shown):
+
+```toml
+[targets.web.health]
+la_per_core_warn = 1.0    # 1-min load average per core
+la_per_core_crit = 2.0
+mem_used_warn_pct = 85    # memory in use (%)
+mem_used_crit_pct = 95
+swap_used_warn_pct = 50   # swap in use (%)
+swap_used_crit_pct = 90
+disk_warn_pct = 85        # filesystem capacity (%)
+disk_crit_pct = 95
+top_n = 5                 # hot processes listed per resource
+```
+
 ### Preparing a target host
 
 The audit is read-only and unprivileged — no `sudoers` entry needed. On the host
@@ -221,15 +241,36 @@ Exit codes: `0` clean · `1` error · `2` a gate tripped. Example CI gate:
 linux-audit-mcp audit --target web --format json --fail-on high --fail-under 70
 ```
 
+### Operational-health snapshot
+
+`health` takes a point-in-time snapshot (load, memory, disk, hot processes,
+connections) — reported **separately** from the security audit, with no 0–100
+score:
+
+```bash
+linux-audit-mcp health --target web            # text (default) or --format json
+```
+
+| Option            | Description                                                     |
+| ----------------- | -------------------------------------------------------------- |
+| `--target`        | Target alias from the config (required).                       |
+| `--format`        | `text` (default) \| `json`.                                    |
+| `--config`        | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default). |
+| `--fail-on-status`| Exit 2 when overall status is at least `warn` / `crit`. `off` (default) never gates. |
+
+Thresholds are per-target (see **Configuration**); a snapshot is momentary, so
+true anomaly/baseline detection is intentionally out of scope for now.
+
 </details>
 
 <details>
 <summary><b>Use it as an MCP server (Claude Desktop / Code)</b></summary>
 
 Run with **no subcommand** and the binary becomes an MCP stdio server exposing the
-tools `ping` and `run_audit`. Claude then invokes the audit itself — you ask in
-chat, it audits and explains. Register it in `claude_desktop_config.json`, as a
-native binary **or** via Docker (same result):
+tools `ping`, `run_audit` and `inspect_load` (the operational-health snapshot,
+reported separately from the security score). Claude then invokes them itself —
+you ask in chat, it audits and explains. Register it in
+`claude_desktop_config.json`, as a native binary **or** via Docker (same result):
 
 Native binary:
 
@@ -270,8 +311,9 @@ instead of `:latest`.
 
 Then ask, e.g. *"Run a hardened audit of `web` and summarise the High findings."*
 The model calls `run_audit { "target": "web" }` and gets the text + JSON report.
-`run_audit` only accepts a target **alias** — a prompt-injected model can't point
-it at another host or key.
+Or *"Is `web` under load right now?"* → `inspect_load { "target": "web" }`. Both
+tools only accept a target **alias** — a prompt-injected model can't point them at
+another host or key.
 
 </details>
 
@@ -350,6 +392,29 @@ RHEL) is reported as `error` and excluded from the score.
 | services  | `services-rpcbind`             | Low      | `rpcbind` enabled                          |
 | logging   | `logging-auditd`               | Low      | `auditd` not enabled                       |
 | logging   | `logging-syslog`               | Low      | no `rsyslog`/`syslog-ng` enabled           |
+
+</details>
+
+<details>
+<summary><b>Operational health</b></summary>
+
+A separate, read-only snapshot (`health` CLI / `inspect_load` MCP tool) using the
+same target aliases and command catalog. It reports metrics as `OK`/`WARN`/`CRIT`
+against per-target thresholds (see **Configuration**) plus the top processes by
+CPU and memory — and deliberately produces **no** 0–100 score, so momentary
+workload never colours the security posture. A missing/unparseable input is
+reported `UNKNOWN` and never gates.
+
+| Metric id             | Reads (unprivileged)                       | Warn/Crit when…                          |
+| --------------------- | ------------------------------------------ | ---------------------------------------- |
+| `health-load`         | `uptime`, `nproc`                          | 1-min load per core ≥ threshold          |
+| `health-memory`       | `free -b`                                  | memory in use % ≥ threshold              |
+| `health-swap`         | `free -b`                                  | swap in use % ≥ threshold                |
+| `health-disk`         | `df -P`                                    | worst real filesystem % ≥ threshold      |
+| `health-connections`  | `ss -s`                                    | informational (established/total count)  |
+
+Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Baseline/anomaly detection
+over history is a future stage; this is a point-in-time reading.
 
 </details>
 

@@ -13,7 +13,7 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 
-use crate::{audit, config, report, scoring};
+use crate::{audit, config, health, report, scoring};
 
 #[derive(Clone)]
 pub(crate) struct AuditServer {
@@ -33,6 +33,12 @@ pub(crate) struct RunAuditParams {
                               overrides the target's configured profile"
     )]
     profile: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub(crate) struct InspectLoadParams {
+    #[schemars(description = "Alias of a target defined in the operator config")]
+    target: String,
 }
 
 #[tool_router]
@@ -82,6 +88,35 @@ impl AuditServer {
             ContentBlock::text(json),
         ]))
     }
+
+    #[tool(
+        description = "Take a read-only operational-health snapshot (load, memory, disk, hot \
+                       processes, connections) of a configured target. Reported separately from \
+                       the security audit; it never affects the security score."
+    )]
+    async fn inspect_load(
+        &self,
+        Parameters(params): Parameters<InspectLoadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cfg = config::load()
+            .map_err(|e| McpError::internal_error(format!("config error: {e}"), None))?;
+        let target = cfg
+            .target(&params.target)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        let report = health::collect(&target.to_ssh_config(), &target.health)
+            .await
+            .map_err(|e| McpError::internal_error(format!("health snapshot failed: {e}"), None))?;
+
+        let text = health::report::text(&params.target, &report);
+        let json = health::report::json(&params.target, &report)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(text),
+            ContentBlock::text(json),
+        ]))
+    }
 }
 
 #[tool_handler]
@@ -91,9 +126,10 @@ impl ServerHandler for AuditServer {
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
-                "Read-only security audit for Linux servers. Use `run_audit` with a target \
-                 alias (defined in the operator config) to audit a host; `ping` is a liveness \
-                 check."
+                "Read-only tools for Linux servers, addressed by a target alias defined in the \
+                 operator config. `run_audit` scores a host's security posture; `inspect_load` \
+                 takes an operational-health snapshot (load/memory/disk/processes) that is kept \
+                 separate from the security score; `ping` is a liveness check."
                     .to_string(),
             )
     }

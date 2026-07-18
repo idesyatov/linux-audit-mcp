@@ -1,0 +1,2 @@
+Total: 90
+TCP:   12 (estab 6, closed 0, orphaned 0, timewait 1)

@@ -1,0 +1,4 @@
+    PID COMMAND         %CPU %MEM
+    612 python3         180.0 15.0
+    340 firewalld        2.0  3.0
+      1 systemd          0.0  0.5

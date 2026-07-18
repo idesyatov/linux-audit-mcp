@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::audit::{self, Outputs};
 use crate::checks::{all_checks, Status};
+use crate::health::{self, HealthStatus, Thresholds, HEALTH_COMMANDS};
 use crate::scoring::{score, Profile};
 
 /// A fixture's expected results.
@@ -131,6 +132,97 @@ fn fixtures_match_expected_findings_and_scores() {
         scenarios += 1;
     }
     assert!(scenarios > 0, "no fixtures found in {}", dir.display());
+}
+
+/// A fixture's expected operational-health results (default thresholds).
+#[derive(Deserialize)]
+struct ExpectedHealth {
+    #[allow(dead_code)]
+    description: String,
+    /// metric id -> expected status ("ok" | "warn" | "crit" | "unknown").
+    metrics: HashMap<String, String>,
+    overall: String,
+}
+
+fn health_status_name(status: HealthStatus) -> &'static str {
+    match status {
+        HealthStatus::Ok => "ok",
+        HealthStatus::Warn => "warn",
+        HealthStatus::Crit => "crit",
+        HealthStatus::Unknown => "unknown",
+    }
+}
+
+fn run_health_scenario(scenario: &Path, name: &str) {
+    let expected: ExpectedHealth = serde_json::from_str(
+        &std::fs::read_to_string(scenario.join("expected_health.json"))
+            .unwrap_or_else(|e| panic!("[{name}] read expected_health.json: {e}")),
+    )
+    .unwrap_or_else(|e| panic!("[{name}] parse expected_health.json: {e}"));
+
+    let mut outputs: Outputs = HashMap::new();
+    for &cmd in HEALTH_COMMANDS {
+        let file = scenario.join(command_slug(cmd));
+        let value = if file.exists() {
+            Ok(std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("[{name}] read {}: {e}", file.display())))
+        } else {
+            Err(format!("command not available on this fixture: {cmd}"))
+        };
+        outputs.insert(cmd, value);
+    }
+
+    let report = health::evaluate(&outputs, &Thresholds::default());
+
+    assert_eq!(
+        report.metrics.len(),
+        expected.metrics.len(),
+        "[{name}] expected.metrics pins {} metrics, health produced {}",
+        expected.metrics.len(),
+        report.metrics.len()
+    );
+    for m in &report.metrics {
+        let want = expected
+            .metrics
+            .get(m.id)
+            .unwrap_or_else(|| panic!("[{name}] no expectation for metric '{}'", m.id));
+        assert_eq!(
+            health_status_name(m.status),
+            want,
+            "[{name}] metric '{}': expected {want}, got {} - {}",
+            m.id,
+            health_status_name(m.status),
+            m.detail
+        );
+    }
+    assert_eq!(
+        health_status_name(report.overall),
+        expected.overall,
+        "[{name}] overall: expected {}, got {}",
+        expected.overall,
+        health_status_name(report.overall)
+    );
+}
+
+#[test]
+fn fixtures_match_expected_health() {
+    let dir = fixtures_dir();
+    let mut scenarios = 0;
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if !path.is_dir() || !path.join("expected_health.json").exists() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        run_health_scenario(&path, &name);
+        scenarios += 1;
+    }
+    assert!(
+        scenarios > 0,
+        "no health fixtures found in {}",
+        dir.display()
+    );
 }
 
 #[test]

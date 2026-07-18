@@ -6,6 +6,13 @@ the same core: an **MCP stdio server** (conversational use) and a **CLI**
 (`audit` subcommand, for cron/CI). Both share the audit engine, the read-only
 SSH transport, the scoring engine and the reporter.
 
+Alongside the security audit it offers a separate **operational-health snapshot**
+(`inspect_load` MCP tool / `health` CLI subcommand): load, memory, disk, hot
+processes and connections as `OK`/`WARN`/`CRIT` against per-target thresholds. It
+reuses the same SSH transport, command catalog and target registry, but is kept
+deliberately **out** of the security path — a momentary workload is not a
+hardening fact, so it produces no 0–100 score and never touches `scoring.rs`.
+
 ## Components & data flow
 
 ```mermaid
@@ -15,26 +22,33 @@ flowchart TB
       CRON["cron / CI"]
     end
 
-    MCP -->|"stdio JSON-RPC"| SERVER["server.rs<br/>MCP tools: ping, run_audit"]
-    CRON -->|"audit subcommand"| CLI["cli.rs<br/>args + exit-code gates"]
+    MCP -->|"stdio JSON-RPC"| SERVER["server.rs<br/>MCP tools: ping, run_audit, inspect_load"]
+    CRON -->|"audit / health subcommand"| CLI["cli.rs<br/>args + exit-code gates"]
 
     SERVER --> CFG["config.rs<br/>operator target registry"]
     CLI --> CFG
     CFG -->|"alias → SshConfig"| AUDIT
+    CFG -->|"alias → SshConfig + thresholds"| HEALTH
 
     SERVER --> AUDIT["audit.rs<br/>run each command once, then evaluate"]
     CLI --> AUDIT
+    SERVER --> HEALTH["health/*<br/>probes + thresholds (no score)"]
+    CLI --> HEALTH
 
     AUDIT --> CHECKS["checks/*<br/>Check trait + parse.rs"]
     AUDIT -->|"command"| SSH["ssh.rs<br/>system ssh subprocess"]
+    HEALTH -->|"command"| SSH
     SSH -->|"validate()"| CAT["catalog.rs<br/>read-only command allowlist"]
     CAT -.->|"reject"| SSH
     SSH -->|"ssh -i key 'PATH=… cmd'"| HOST[("target host")]
 
     CHECKS --> SCORE["scoring.rs<br/>weighted score + profile"]
     SCORE --> REPORT["report.rs<br/>text + json"]
+    HEALTH --> HREPORT["health/report.rs<br/>text + json (OK/WARN/CRIT)"]
     REPORT --> SERVER
     REPORT --> CLI
+    HREPORT --> SERVER
+    HREPORT --> CLI
 ```
 
 ## Request flow — `run_audit`
@@ -81,9 +95,9 @@ from the score.
 
 | Module           | Responsibility                                                                 |
 | ---------------- | ------------------------------------------------------------------------------ |
-| `main.rs`        | Wires modules; routes CLI (no subcommand → `serve`, `audit` → one-shot).        |
-| `server.rs`      | MCP stdio server; tools `ping` and `run_audit` (takes a target **alias**).      |
-| `cli.rs`         | `audit` subcommand: flags, `--format`, and `--fail-on` / `--fail-under` gates.  |
+| `main.rs`        | Wires modules; routes CLI (no subcommand → `serve`, `audit`/`health` → one-shot).|
+| `server.rs`      | MCP stdio server; tools `ping`, `run_audit`, `inspect_load` (target **alias**).  |
+| `cli.rs`         | `audit`/`health` subcommands: flags, `--format`, exit-code gates.                |
 | `config.rs`      | Operator target registry (`targets.toml`); alias → `SshConfig`.                 |
 | `ssh.rs`         | SSH transport via `tokio::process`; key-only, timeouts; validates then sends.   |
 | `catalog.rs`     | 🔒 Read-only command allowlist + charset filter. The core safety boundary.      |
@@ -93,7 +107,10 @@ from the score.
 | `checks/*.rs`    | The 20 checks, grouped by domain; each is a pure `evaluate(output) → Outcome`.  |
 | `scoring.rs`     | Weighted 0–100 score, `baseline`/`hardened` profiles, severity penalties.       |
 | `report.rs`      | Renders findings + score to text and JSON.                                      |
-| `evals.rs`       | (test-only) per-distro fixture regression tests.                                |
+| `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O) and pure `evaluate()`; no score. |
+| `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s).                            |
+| `health/report.rs`| Renders the health snapshot (`OK`/`WARN`/`CRIT`) to text and JSON.              |
+| `evals.rs`       | (test-only) per-distro fixture regression tests (audit **and** health).         |
 
 ## The read-only trust boundary 🔒
 
@@ -139,14 +156,25 @@ with no host — that is exactly what the Stage 8 evals (`evals.rs` +
 The invariant tests then enforce that every check's command is in the catalog and
 that check ids are unique.
 
+## Adding a health probe
+
+The health snapshot mirrors the same I/O split. To add a metric: add its
+read-only command to `catalog.rs` if new; add a tolerant parser to
+`health/parse.rs`; write a probe function in `health/mod.rs` that turns parsed
+input + `Thresholds` into a `Metric` (`Ok`/`Warn`/`Crit`, or `Unknown` when the
+input is missing); include it in `evaluate()`. An invariant test asserts every
+`HEALTH_COMMANDS` entry is in the catalog, and health evals pin per-metric status
+against `tests/fixtures/<distro>/expected_health.json`. Thresholds stay in
+`config.rs` (`[targets.x.health]`), never in tool arguments.
+
 ## Testing layers
 
 | Layer            | Where                                   | Guards                                   |
 | ---------------- | --------------------------------------- | ---------------------------------------- |
 | Unit             | `#[cfg(test)]` in each module           | Parser + per-check logic, scoring formula |
-| Invariant        | `checks/mod.rs`, `evals.rs`             | Commands ⊂ catalog; unique ids; unique slugs |
+| Invariant        | `checks/mod.rs`, `health/mod.rs`, `evals.rs` | Check + health commands ⊂ catalog; unique ids/slugs |
 | Integration      | `tests/mcp_stdio.rs`                    | MCP handshake, tool advertisement, alias rejection |
-| Evals            | `evals.rs` + `tests/fixtures/<distro>/` | Findings + scores on captured per-distro output |
+| Evals            | `evals.rs` + `tests/fixtures/<distro>/` | Findings + scores, and health metric statuses, on captured output |
 
 All run under `docker compose run --rm test`; lint (`fmt` + `clippy -D warnings`)
 under `docker compose run --rm lint`. CI runs both in the same image.
