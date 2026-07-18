@@ -48,11 +48,11 @@ Most people want the same thing first: **a one-off security report for a host
 (say, a VPS), from the terminal.** That's the path below — auditing from Claude or
 gating CI reuse the very same config (see the table after).
 
-**1. Get the tool** — either is fine:
+**1. Get the tool.** Install a native binary (see **Installation**) — or just use
+Docker, which needs nothing installed. Check it runs:
 
 ```bash
-docker run --rm ghcr.io/idesyatov/linux-audit-mcp:latest --version   # needs only Docker
-# ...or download a native binary for your OS — see Installation.
+docker run --pull always --rm ghcr.io/idesyatov/linux-audit-mcp:latest --version
 ```
 
 **2. Describe the target** in `~/.config/linux-audit-mcp/targets.toml`:
@@ -67,14 +67,16 @@ identity_file = "~/.ssh/audit_ed25519"  # your SSH private key (same for native 
 The target just needs an unprivileged `auditor` user reachable by your key — see
 **Configuration** to set that up.
 
-**3. Run the audit** by alias:
+**3. Run the audit** by alias — native binary:
 
 ```bash
-# native binary
 linux-audit-mcp audit --target web
+```
 
-# ...or Docker (mount the config + key, read-only)
-docker run -i --rm \
+...or via Docker (`--pull always` keeps the image current):
+
+```bash
+docker run --pull always --rm \
   -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
   -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
   ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web
@@ -189,15 +191,16 @@ Standard tools are expected on the target: `sshd_config`, `getent`, `sysctl`,
 <details>
 <summary><b>Use it as a CLI</b></summary>
 
-A one-off report in your terminal (also for cron / CI). Run the native binary — or
-the exact same command inside the container:
+A one-off report in your terminal (also for cron / CI) — native binary:
 
 ```bash
-# native binary
 linux-audit-mcp audit --target web [OPTIONS]
+```
 
-# ...or via Docker (mounts + hardened flags: see "Docker image")
-docker run -i --rm \
+...or the same via Docker (mounts explained under **Docker image**):
+
+```bash
+docker run --rm \
   -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
   -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
   ghcr.io/idesyatov/linux-audit-mcp:latest audit --target web [OPTIONS]
