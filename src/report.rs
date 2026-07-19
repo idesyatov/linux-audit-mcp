@@ -46,15 +46,26 @@ pub fn text(target: &str, score: &Score, findings: &[Finding]) -> String {
         .iter()
         .filter(|f| f.status == Status::Error)
         .count();
+    let skipped = findings
+        .iter()
+        .filter(|f| f.status == Status::Skipped)
+        .count();
 
     let profile = match score.profile {
         crate::scoring::Profile::Baseline => "baseline",
         crate::scoring::Profile::Hardened => "hardened",
     };
     let mut out = String::new();
+    // Only mention skipped privileged checks when there are any, to keep the
+    // common (unprivileged) summary line unchanged.
+    let skip_note = if skipped > 0 {
+        format!(", {skipped} skipped")
+    } else {
+        String::new()
+    };
     let _ = writeln!(
         out,
-        "Audit of '{target}' [{profile}]: score {}/100 ({passed} passed, {failed} failed, {errored} errored)",
+        "Audit of '{target}' [{profile}]: score {}/100 ({passed} passed, {failed} failed, {errored} errored{skip_note})",
         score.total
     );
 
@@ -70,6 +81,7 @@ pub fn text(target: &str, score: &Score, findings: &[Finding]) -> String {
             Status::Pass => "PASS",
             Status::Fail => "FAIL",
             Status::Error => "ERR ",
+            Status::Skipped => "SKIP",
         };
         let _ = writeln!(
             out,

@@ -62,6 +62,22 @@ pub fn parse_passwd(output: &str) -> Vec<PasswdEntry> {
         .collect()
 }
 
+/// Usernames from `/etc/shadow` whose password field (index 1) is empty - the
+/// account can authenticate with no password. Locked (`!`, `*`) and hashed
+/// entries are fine and excluded; malformed/short lines are skipped.
+pub fn shadow_empty_password_accounts(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() < 2 || f[0].trim().is_empty() {
+                return None;
+            }
+            f[1].is_empty().then(|| f[0].trim().to_string())
+        })
+        .collect()
+}
+
 /// Parse `sysctl -a` output (`key = value` lines) into a map.
 pub fn parse_sysctl(output: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -139,6 +155,19 @@ mod tests {
         assert_eq!(e[0].name, "root");
         assert_eq!(e[0].uid, 0);
         assert_eq!(e[1].shell, "/usr/sbin/nologin");
+    }
+
+    #[test]
+    fn shadow_empty_passwords() {
+        let out = "root:$6$abc$hash:19000:0:99999:7:::\n\
+                   daemon:*:19000:0:99999:7:::\n\
+                   locked:!:19000:0:99999:7:::\n\
+                   nopass::19000:0:99999:7:::\n\
+                   also_nopass::19000:0:99999:7:::\n";
+        let empty = shadow_empty_password_accounts(out);
+        assert_eq!(empty, vec!["nopass", "also_nopass"]);
+        // A normal shadow yields nothing.
+        assert!(shadow_empty_password_accounts("root:$6$x:19000::::::\n").is_empty());
     }
 
     #[test]

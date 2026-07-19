@@ -47,6 +47,10 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // CPU/IO pressure (Stage B3): `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",
+    // Privileged read-only checks (run only on targets opted in with
+    // `privileged = true`; the operator grants NOPASSWD sudo for exactly these).
+    // `sudo -n` never prompts - it fails fast if not permitted.
+    "sudo -n cat /etc/shadow",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)

@@ -40,13 +40,18 @@ pub async fn audit_targets(
     for alias in aliases {
         let resolved = cfg.resolve(alias)?;
         let profile = profile_override.or(resolved.profile).unwrap_or_default();
-        jobs.push((alias.clone(), resolved.to_ssh_config(), profile));
+        jobs.push((
+            alias.clone(),
+            resolved.to_ssh_config(),
+            profile,
+            resolved.privileged,
+        ));
     }
 
     let mut set = JoinSet::new();
-    for (i, (alias, ssh, profile)) in jobs.into_iter().enumerate() {
+    for (i, (alias, ssh, profile, privileged)) in jobs.into_iter().enumerate() {
         set.spawn(async move {
-            let result = match audit::run_audit(&ssh).await {
+            let result = match audit::run_audit(&ssh, privileged).await {
                 Ok(findings) => {
                     let score = scoring::score(&findings, profile);
                     Ok((score, findings))

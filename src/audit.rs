@@ -15,41 +15,48 @@ pub type Outputs = HashMap<&'static str, Result<String, String>>;
 pub fn evaluate(outputs: &Outputs) -> Vec<Finding> {
     all_checks()
         .iter()
-        .map(|check| match &outputs[check.command()] {
-            Ok(output) => {
-                let outcome = check.evaluate(output);
-                Finding {
-                    id: check.id(),
-                    domain: check.domain(),
-                    title: check.title(),
-                    severity: check.severity(),
-                    status: outcome.status,
-                    detail: outcome.detail,
-                    recommendation: check.recommendation(),
+        .map(|check| {
+            // A command absent from `outputs` was never collected - i.e. a
+            // privileged check on a target that isn't opted in -> Skipped.
+            let (status, detail) = match outputs.get(check.command()) {
+                Some(Ok(output)) => {
+                    let o = check.evaluate(output);
+                    (o.status, o.detail)
                 }
-            }
-            Err(err) => Finding {
+                Some(Err(err)) => (Status::Error, err.clone()),
+                None => (
+                    Status::Skipped,
+                    "privileged check not enabled for this target".to_string(),
+                ),
+            };
+            Finding {
                 id: check.id(),
                 domain: check.domain(),
                 title: check.title(),
                 severity: check.severity(),
-                status: Status::Error,
-                detail: err.clone(),
+                status,
+                detail,
                 recommendation: check.recommendation(),
-            },
+            }
         })
         .collect()
 }
 
-/// Run every check against `ssh` and collect findings.
+/// Run every check against `ssh` and collect findings. `privileged` gates the
+/// `sudo -n ...` checks: when `false` their commands are never sent and they are
+/// reported as [`Status::Skipped`].
 ///
 /// Host-level failures (auth, connection, timeout) abort the whole audit.
 /// A per-command remote failure (ssh connected but the command errored) is
 /// recorded as an `Error` finding for the checks that needed it; the rest run.
-pub async fn run_audit(ssh: &SshConfig) -> Result<Vec<Finding>, SshError> {
+pub async fn run_audit(ssh: &SshConfig, privileged: bool) -> Result<Vec<Finding>, SshError> {
     // Snap each distinct command exactly once.
     let mut outputs: Outputs = HashMap::new();
     for check in &all_checks() {
+        // Never send a privileged command to a target that didn't opt in.
+        if check.privileged() && !privileged {
+            continue;
+        }
         let cmd = check.command();
         if outputs.contains_key(cmd) {
             continue;

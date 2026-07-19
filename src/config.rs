@@ -47,6 +47,9 @@ pub struct HostVars {
     pub profile: Option<Profile>,
     pub health: Option<Thresholds>,
     pub anomaly: Option<AnomalyConfig>,
+    /// Opt in to privileged (`sudo -n ...`) checks for this target. Requires the
+    /// operator to grant NOPASSWD sudo for exactly those commands (see README).
+    pub privileged: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +80,7 @@ pub struct ResolvedTarget {
     pub profile: Option<Profile>,
     pub health: Thresholds,
     pub anomaly: AnomalyConfig,
+    pub privileged: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -208,6 +212,8 @@ impl Config {
             health: inherit(v.health, &groups, |h| h.health, "health", alias)?.unwrap_or_default(),
             anomaly: inherit(v.anomaly, &groups, |h| h.anomaly, "anomaly", alias)?
                 .unwrap_or_default(),
+            privileged: inherit(v.privileged, &groups, |h| h.privileged, "privileged", alias)?
+                .unwrap_or(false),
         })
     }
 
@@ -537,6 +543,29 @@ mod tests {
         assert_eq!(db.anomaly.min_samples, 20);
         // A target with no anomaly table gets the full default (enabled).
         assert!(cfg.resolve("web").unwrap().anomaly.enabled);
+    }
+
+    #[test]
+    fn privileged_flag_parses_and_inherits() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.secure]
+            members = ["a", "b"]
+            privileged = true
+            [targets.a]
+            host = "1.1.1.1"
+            [targets.b]
+            host = "2.2.2.2"
+            privileged = false
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.resolve("a").unwrap().privileged); // inherited from group
+        assert!(!cfg.resolve("b").unwrap().privileged); // host overrides to false
+
+        // Default is false (opt-in).
+        let plain: Config = toml::from_str("[targets.c]\nhost = \"3.3.3.3\"").unwrap();
+        assert!(!plain.resolve("c").unwrap().privileged);
     }
 
     #[test]

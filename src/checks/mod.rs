@@ -46,6 +46,10 @@ pub enum Status {
     Pass,
     Fail,
     Error,
+    /// A privileged check that didn't run because the target isn't opted in
+    /// (`privileged = false`). Excluded from the score, like `Error`, but it is
+    /// a deliberate skip rather than a failure.
+    Skipped,
 }
 
 /// A single audit result.
@@ -93,6 +97,12 @@ pub trait Check: Send + Sync {
     fn command(&self) -> &'static str;
     /// Pure evaluation of the command's output.
     fn evaluate(&self, output: &str) -> Outcome;
+    /// `true` if the check needs root (its command is a `sudo -n ...` reader).
+    /// Such checks run only on targets opted in with `privileged = true`, and
+    /// are otherwise reported as [`Status::Skipped`].
+    fn privileged(&self) -> bool {
+        false
+    }
 }
 
 /// Every check the auditor runs.
@@ -109,6 +119,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(accounts::NonRootUid0),
         Box::new(accounts::PassMaxDays),
         Box::new(accounts::DefaultUmask),
+        Box::new(accounts::ShadowEmptyPassword), // privileged (sudo)
         // kernel
         Box::new(kernel::Aslr),
         Box::new(kernel::TcpSyncookies),

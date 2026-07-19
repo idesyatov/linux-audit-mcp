@@ -10,6 +10,7 @@
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
     "accounts-umask": "pass",
+    "accounts-shadow-empty-password": "fail",
     "kernel-aslr": "pass",
     "kernel-tcp-syncookies": "pass",
     "kernel-rp-filter": "pass",
@@ -26,7 +27,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 61,
-    "hardened": 51
+    "baseline": 34,
+    "hardened": 11
   }
 }

@@ -52,6 +52,7 @@ fn status_name(status: Status) -> &'static str {
         Status::Pass => "pass",
         Status::Fail => "fail",
         Status::Error => "error",
+        Status::Skipped => "skipped",
     }
 }
 
@@ -62,8 +63,10 @@ fn run_scenario(scenario: &Path, name: &str) {
     )
     .unwrap_or_else(|e| panic!("[{name}] parse expected.json: {e}"));
 
-    // Load each distinct command's output; a missing file means the command is
-    // unavailable on this distro (an Error finding).
+    // Load each distinct command's output. A missing file means the command is
+    // unavailable: for a normal check that's an Error finding; for a *privileged*
+    // check it models a target not opted in, so the command is left uncollected
+    // (evaluate() then reports it as Skipped) - mirroring the real run path.
     let mut outputs: Outputs = HashMap::new();
     for check in all_checks() {
         let cmd = check.command();
@@ -71,13 +74,18 @@ fn run_scenario(scenario: &Path, name: &str) {
             continue;
         }
         let file = scenario.join(command_slug(cmd));
-        let value = if file.exists() {
-            Ok(std::fs::read_to_string(&file)
-                .unwrap_or_else(|e| panic!("[{name}] read {}: {e}", file.display())))
+        if file.exists() {
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("[{name}] read {}: {e}", file.display()));
+            outputs.insert(cmd, Ok(text));
+        } else if check.privileged() {
+            continue; // not opted in -> Skipped
         } else {
-            Err(format!("command not available on this fixture: {cmd}"))
-        };
-        outputs.insert(cmd, value);
+            outputs.insert(
+                cmd,
+                Err(format!("command not available on this fixture: {cmd}")),
+            );
+        }
     }
 
     let findings = audit::evaluate(&outputs);

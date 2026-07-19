@@ -105,6 +105,8 @@ pub struct DomainScore {
     pub checks: usize,
     pub failed: usize,
     pub errored: usize,
+    /// Privileged checks skipped because the target isn't opted in.
+    pub skipped: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,11 +132,13 @@ pub fn score(findings: &[Finding], profile: Profile) -> Score {
         let mut checks = 0usize;
         let mut failed = 0usize;
         let mut errored = 0usize;
+        let mut skipped = 0usize;
         let mut deducted = 0.0;
 
         for f in in_domain {
             match f.status {
                 Status::Error => errored += 1,
+                Status::Skipped => skipped += 1,
                 Status::Pass => checks += 1,
                 Status::Fail => {
                     checks += 1;
@@ -155,6 +159,7 @@ pub fn score(findings: &[Finding], profile: Profile) -> Score {
             checks,
             failed,
             errored,
+            skipped,
         });
     }
 

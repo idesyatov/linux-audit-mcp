@@ -1,10 +1,12 @@
 //! Accounts-domain checks (`getent passwd`, `/etc/login.defs`).
 
-use super::parse::{parse_keyword_map, parse_passwd};
+use super::parse::{parse_keyword_map, parse_passwd, shadow_empty_password_accounts};
 use super::{Check, Domain, Outcome, Severity};
 
 const PASSWD_CMD: &str = "getent passwd";
 const LOGIN_DEFS_CMD: &str = "cat /etc/login.defs";
+/// Root-only: `/etc/shadow` is unreadable to unprivileged users.
+const SHADOW_CMD: &str = "sudo -n cat /etc/shadow";
 
 /// An account other than `root` has UID 0 (a hidden superuser).
 pub struct NonRootUid0;
@@ -118,6 +120,45 @@ impl Check for DefaultUmask {
     }
 }
 
+/// An account has an empty password field in `/etc/shadow` - it can log in with
+/// no password at all. Privileged: `/etc/shadow` is root-only, read via `sudo`.
+pub struct ShadowEmptyPassword;
+
+impl Check for ShadowEmptyPassword {
+    fn id(&self) -> &'static str {
+        "accounts-shadow-empty-password"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Accounts
+    }
+    fn title(&self) -> &'static str {
+        "Account with an empty password"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Critical
+    }
+    fn recommendation(&self) -> &'static str {
+        "Lock or set a password for any account with an empty /etc/shadow field: passwd -l <user>."
+    }
+    fn command(&self) -> &'static str {
+        SHADOW_CMD
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let empty = shadow_empty_password_accounts(output);
+        if empty.is_empty() {
+            Outcome::pass("No accounts have an empty password.")
+        } else {
+            Outcome::fail(format!(
+                "Accounts with an empty password: {}.",
+                empty.join(", ")
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -151,5 +192,17 @@ mod tests {
         assert_eq!(DefaultUmask.evaluate("UMASK 022\n").status, Status::Fail);
         // Unset -> default 022 -> fail.
         assert_eq!(DefaultUmask.evaluate("# nothing\n").status, Status::Fail);
+    }
+
+    #[test]
+    fn shadow_empty_password() {
+        // Privileged check reading root-only /etc/shadow.
+        assert!(ShadowEmptyPassword.privileged());
+        let clean = "root:$6$x$hash:19000::::::\nbin:*:19000::::::\n";
+        assert_eq!(ShadowEmptyPassword.evaluate(clean).status, Status::Pass);
+        let bad = "root:$6$x$hash:19000::::::\nguest::19000::::::\n";
+        let out = ShadowEmptyPassword.evaluate(bad);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("guest"));
     }
 }

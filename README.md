@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 23 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 24 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -517,9 +517,11 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-23 checks; each reads one read-only command and applies the tool/OpenSSH default
+24 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
-RHEL) is reported as `error` and excluded from the score.
+RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
+**privileged** (need `sudo`) and run only on targets opted in with
+`privileged = true` — otherwise they are `skipped` (see **Privileged checks**).
 
 | Domain    | Check id                       | Sev.     | Flags when…                                |
 | --------- | ------------------------------ | -------- | ------------------------------------------ |
@@ -532,6 +534,7 @@ RHEL) is reported as `error` and excluded from the score.
 | accounts  | `accounts-nonroot-uid0`        | Critical | a non-`root` account has UID 0             |
 | accounts  | `accounts-pass-max-days`       | Low      | `PASS_MAX_DAYS` > 365 or unset             |
 | accounts  | `accounts-umask`               | Low      | default `UMASK` allows group/other access  |
+| accounts  | `accounts-shadow-empty-password` 🔑 | Critical | an account has an empty `/etc/shadow` password |
 | kernel    | `kernel-aslr`                  | Medium   | `randomize_va_space` ≠ 2                    |
 | kernel    | `kernel-tcp-syncookies`        | Low      | `tcp_syncookies` ≠ 1                        |
 | kernel    | `kernel-rp-filter`             | Low      | `rp_filter` not 1/2                         |
@@ -546,6 +549,36 @@ RHEL) is reported as `error` and excluded from the score.
 | services  | `services-fail2ban`            | Low      | `fail2ban` not enabled                     |
 | logging   | `logging-auditd`               | Low      | `auditd` not enabled                       |
 | logging   | `logging-syslog`               | Low      | no `rsyslog`/`syslog-ng` enabled           |
+
+</details>
+
+<details>
+<summary><b>Privileged checks (🔑, opt-in)</b></summary>
+
+A few checks need root to read (`/etc/shadow`, …). They are **off by default** and
+run only on targets you explicitly opt in:
+
+```toml
+[targets.web]
+host = "203.0.113.10"
+privileged = true          # enable sudo-based checks for this host
+```
+
+They run as `sudo -n <read-only command>` — **`-n` never prompts**, so a host that
+hasn't granted sudo simply reports the check as `skipped` (never a hang, never a
+failure). Nothing else changes: the commands are still exact members of the
+read-only catalog, and the model still only ever picks a target *alias*.
+
+Grant the auditor **passwordless sudo for exactly these commands** — never `ALL`.
+On the target (`visudo -f /etc/sudoers.d/linux-audit`):
+
+```
+auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow
+```
+
+Skipped checks are excluded from the score (like `error`); the report shows them
+as `[SKIP]` with an `N skipped` note. Opt in per host or per group (the flag is
+inherited like other group vars).
 
 </details>
 
