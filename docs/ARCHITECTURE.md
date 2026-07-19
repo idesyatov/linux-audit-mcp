@@ -13,6 +13,11 @@ reuses the same SSH transport, command catalog and target registry, but is kept
 deliberately **out** of the security path — a momentary workload is not a
 hardening fact, so it produces no 0–100 score and never touches `scoring.rs`.
 
+Each snapshot is also **recorded** (append-only JSONL per target, `history.rs`)
+and compared against the host's own recent norm to surface **anomalies**
+(`anomaly.rs`: robust median + MAD baseline). Anomalies are informational too —
+they never affect the health status, the exit code, or the security score.
+
 ## Components & data flow
 
 ```mermaid
@@ -45,6 +50,9 @@ flowchart TB
     CHECKS --> SCORE["scoring.rs<br/>weighted score + profile"]
     SCORE --> REPORT["report.rs<br/>text + json"]
     HEALTH --> HREPORT["health/report.rs<br/>text + json (OK/WARN/CRIT)"]
+    HEALTH -->|"record snapshot"| HIST["history.rs<br/>JSONL per target"]
+    HIST -->|"baseline window"| ANOM["anomaly.rs<br/>median + MAD detect"]
+    ANOM -->|"anomalies"| HREPORT
     REPORT --> SERVER
     REPORT --> CLI
     HREPORT --> SERVER
@@ -111,7 +119,8 @@ from the score.
 | `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O, incl. 2-sample net) and pure `evaluate()`; no score. |
 | `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s, /proc/net/dev).             |
 | `health/report.rs`| Renders the health snapshot (`OK`/`WARN`/`CRIT`) to text and JSON.              |
-| `history.rs`     | Persists each health snapshot as append-only JSONL per target (`$LINUX_AUDIT_DATA_DIR`); `history` subcommand lists it. File-based, no DB; baselining over it is a later stage. |
+| `history.rs`     | Persists each health snapshot as append-only JSONL per target (`$LINUX_AUDIT_DATA_DIR`); `history` subcommand lists it. File-based, no DB.          |
+| `anomaly.rs`     | Per-host anomaly detection over history: robust baseline (median + MAD), modified z-score + materiality gate. Pure; owns `AnomalyConfig` (imported by `config.rs`, no cycle). Informational — never touches score/status/exit. |
 | `evals.rs`       | (test-only) per-distro fixture regression tests (audit **and** health).         |
 
 ## The read-only trust boundary 🔒

@@ -155,10 +155,12 @@ impl AuditServer {
         let cfg = config::load()
             .map_err(|e| McpError::internal_error(format!("config error: {e}"), None))?;
         let (aliases, group) = select(&cfg, params.target, params.group)?;
-        let outcomes = run::health_targets(&cfg, &aliases)
+        let mut outcomes = run::health_targets(&cfg, &aliases)
             .await
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
+        // Detect anomalies against stored history BEFORE recording this run.
+        run::annotate_anomalies(&cfg, &mut outcomes);
         // Persist each successful snapshot so the recurring "pulse" builds up
         // per-host history for later baselining. Best-effort (errors are logged).
         history::record_outcomes(&outcomes, true);

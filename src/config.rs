@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::anomaly::AnomalyConfig;
 use crate::health::Thresholds;
 use crate::scoring::Profile;
 use crate::ssh::{SshConfig, StrictHostKey};
@@ -45,6 +46,7 @@ pub struct HostVars {
     pub command_timeout_secs: Option<u64>,
     pub profile: Option<Profile>,
     pub health: Option<Thresholds>,
+    pub anomaly: Option<AnomalyConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +76,7 @@ pub struct ResolvedTarget {
     pub command_timeout_secs: u64,
     pub profile: Option<Profile>,
     pub health: Thresholds,
+    pub anomaly: AnomalyConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -203,6 +206,8 @@ impl Config {
             .unwrap_or(30),
             profile: inherit(v.profile, &groups, |h| h.profile, "profile", alias)?,
             health: inherit(v.health, &groups, |h| h.health, "health", alias)?.unwrap_or_default(),
+            anomaly: inherit(v.anomaly, &groups, |h| h.anomaly, "anomaly", alias)?
+                .unwrap_or_default(),
         })
     }
 
@@ -497,6 +502,41 @@ mod tests {
         assert_eq!(cfg.resolve("web").unwrap().health.disk_warn_pct, 70);
         // mt2 overrides with its own.
         assert_eq!(cfg.resolve("mt2").unwrap().health.disk_warn_pct, 60);
+    }
+
+    #[test]
+    fn anomaly_config_parses_and_inherits() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.prod]
+            members = ["web", "db"]
+            [groups.prod.anomaly]
+            k = 4.0
+
+            [targets.web]
+            host = "1.1.1.1"
+
+            [targets.db]
+            host = "2.2.2.2"
+            [targets.db.anomaly]
+            k = 5.0
+            min_samples = 20
+            "#,
+        )
+        .unwrap();
+
+        // web inherits the group's anomaly settings; unset fields keep defaults.
+        let web = cfg.resolve("web").unwrap();
+        assert_eq!(web.anomaly.k, 4.0);
+        // unset fields keep their defaults
+        assert_eq!(web.anomaly.min_samples, 8);
+
+        // db overrides with its own values.
+        let db = cfg.resolve("db").unwrap();
+        assert_eq!(db.anomaly.k, 5.0);
+        assert_eq!(db.anomaly.min_samples, 20);
+        // A target with no anomaly table gets the full default (enabled).
+        assert!(cfg.resolve("web").unwrap().anomaly.enabled);
     }
 
     #[test]

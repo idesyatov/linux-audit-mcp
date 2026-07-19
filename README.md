@@ -11,7 +11,8 @@
   Run it when you set up or change a host.
 - 📈 **Operational health** — a live **load / memory / disk / network** snapshot of
   one host or your **whole fleet** (host groups), flagged `OK`/`WARN`/`CRIT`. Run it
-  on a schedule to keep a pulse on every server.
+  on a schedule to keep a pulse on every server — each run is recorded and checked
+  against the host's own baseline to surface **anomalies**.
 
 Run either from your terminal, in cron/CI, or let **Claude** run it for you (it's an
 MCP server). It connects with an SSH key you provide and issues only a curated set of
@@ -258,6 +259,18 @@ net_sample_secs = 1       # gap between the two /proc/net/dev samples
 top_n = 5                 # hot processes listed per resource
 ```
 
+Optional per-target **anomaly detection** settings (compared against the host's
+own recorded history; any subset, omitted keys use the defaults shown):
+
+```toml
+[targets.web.anomaly]
+enabled = true      # master switch for this target
+k = 3.5             # flag when the modified z-score (deviation in scaled-MAD units) >= k
+rel_floor = 0.15    # ...and the change is at least this fraction of the baseline
+min_samples = 8     # snapshots required before a metric is judged (else "warming up")
+window = 100        # most-recent snapshots forming the baseline
+```
+
 ### Preparing a target host
 
 Create the unprivileged `auditor` user reachable by your key — see **Quick start ›
@@ -324,9 +337,8 @@ linux-audit-mcp health --target web            # text (default) or --format json
 | `--no-store`      | Do not append this snapshot to the on-disk history.            |
 
 Thresholds are per-target (see **Configuration**). Each snapshot is also
-**recorded** to a per-target history file (see below) so trends accumulate over
-time; today those readings are compared only against the static thresholds —
-per-host baseline/anomaly detection over the history is a future step.
+**recorded** to a per-target history file (see **Health history**), and compared
+against this host's own recent norm — see **Anomaly detection** below.
 
 </details>
 
@@ -365,6 +377,37 @@ docker run --rm \
   -v linux-audit-history:/data \
   ghcr.io/idesyatov/linux-audit-mcp:latest health --group all
 ```
+
+</details>
+
+<details>
+<summary><b>Anomaly detection</b></summary>
+
+Once enough history has accumulated, every `health` run compares the fresh
+reading against **this host's own recent norm** and flags metrics that deviate —
+a real anomaly is a departure from the host's baseline, not the crossing of a
+global threshold. The baseline is **robust**: the median and median absolute
+deviation (MAD) over the recent window, so a single transient spike does not
+poison the norm. A metric is flagged only when it is both statistically far from
+the median (modified z-score ≥ `k`) **and** materially large (≥ `rel_floor` of
+the baseline), which keeps stable metrics quiet.
+
+Anomalies show up as an `ANOMALY` block in the health report (and an `anomalies`
+array in the JSON). They are **informational only** — an anomaly is an unusual
+workload, not a hardening regression, so it never changes the health `overall`
+status, the exit code, or the security score. Until a target has at least
+`min_samples` snapshots you'll see a `baseline warming up (n/min)` note instead.
+
+```text
+Health of 'db': WARN (operational, not a security score)
+  [WARN] health-disk           88% on / (/ 88%)
+  ...
+  ANOMALY vs baseline (1), informational:
+    health-load          3.90 vs median 0.35 (+1014%, z=11.2)
+```
+
+Tunable per target (see **Configuration**): `enabled`, `k` (default `3.5`),
+`rel_floor` (`0.15`), `min_samples` (`8`), `window` (`100`).
 
 </details>
 
@@ -522,8 +565,9 @@ reported `UNKNOWN` and never gates.
 
 Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Network throughput is a rate,
 so it samples the interface counters **twice** (`net_sample_secs` apart, ~1s) and
-reports the delta — the snapshot therefore takes about a second longer. Baseline/
-anomaly detection over history is a future stage; this is a point-in-time reading.
+reports the delta — the snapshot therefore takes about a second longer. Each
+reading is also compared against the host's recorded baseline (median + MAD) — see
+**Anomaly detection**.
 
 </details>
 

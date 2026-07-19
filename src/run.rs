@@ -9,10 +9,12 @@
 use serde_json::json;
 use tokio::task::JoinSet;
 
+use crate::anomaly;
 use crate::audit;
 use crate::checks::Finding;
 use crate::config::{Config, ConfigError};
 use crate::health::{self, HealthReport, HealthStatus};
+use crate::history;
 use crate::scoring::{self, Profile, Score};
 
 /// Result of auditing one host: its score+findings, or a runtime error message.
@@ -75,6 +77,43 @@ pub async fn health_targets(
         });
     }
     Ok(collect_ordered(set).await)
+}
+
+/// Fill in `report.anomalies` for each successful outcome by comparing the fresh
+/// reading against this host's stored history (Stage B2). Must run BEFORE the
+/// new snapshot is recorded, so the current run is not part of its own baseline.
+///
+/// Best-effort: a history-read error, an unresolvable alias, or a warming-up
+/// baseline leaves `anomalies` empty (with a note) and never fails the run.
+pub fn annotate_anomalies(cfg: &Config, outcomes: &mut [HealthOutcome]) {
+    for o in outcomes.iter_mut() {
+        let Ok(report) = &mut o.result else { continue };
+        let acfg = match cfg.resolve(&o.alias) {
+            Ok(r) => r.anomaly,
+            Err(_) => continue, // resolved once already during the run; skip quietly
+        };
+        if !acfg.enabled {
+            report.anomaly_note = Some("anomaly detection disabled".to_string());
+            continue;
+        }
+        let hist = match history::read_recent(&o.alias, acfg.window) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!("anomaly: could not read history for '{}': {e}", o.alias);
+                continue;
+            }
+        };
+        if hist.len() < acfg.min_samples {
+            report.anomaly_note = Some(format!(
+                "baseline warming up ({}/{})",
+                hist.len(),
+                acfg.min_samples
+            ));
+            continue;
+        }
+        let found = anomaly::detect(report, &hist, &acfg);
+        report.anomalies = found;
+    }
 }
 
 /// Drain a `JoinSet<(index, T)>` and return the `T`s in ascending index order.
@@ -196,4 +235,88 @@ pub fn audit_group_json(group: &str, outcomes: &[AuditOutcome]) -> serde_json::R
         "kind": "audit-group",
         "hosts": hosts,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::health::Metric;
+    use crate::history::{record_in, Snapshot};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    // Only this test touches $LINUX_AUDIT_DATA_DIR (history tests use explicit
+    // dirs), so setting it process-wide here does not race other tests.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("lah-run-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn load_report(current: f64) -> HealthReport {
+        HealthReport {
+            metrics: vec![Metric {
+                id: "health-load",
+                title: "Load average",
+                status: HealthStatus::Ok,
+                value: String::new(),
+                detail: String::new(),
+                numeric: Some(current),
+            }],
+            top_cpu: vec![],
+            top_mem: vec![],
+            overall: HealthStatus::Ok,
+            anomalies: vec![],
+            anomaly_note: None,
+        }
+    }
+
+    fn snap(ts: u64, load: f64) -> Snapshot {
+        let mut m = BTreeMap::new();
+        m.insert("health-load".to_string(), load);
+        Snapshot {
+            ts,
+            overall: HealthStatus::Ok,
+            metrics: m,
+        }
+    }
+
+    fn outcome(current: f64) -> Vec<HealthOutcome> {
+        vec![HealthOutcome {
+            alias: "web".to_string(),
+            result: Ok(load_report(current)),
+        }]
+    }
+
+    #[test]
+    fn annotate_warms_up_then_flags_spike() {
+        let dir = temp_dir("anom");
+        std::env::set_var("LINUX_AUDIT_DATA_DIR", &dir);
+        let cfg: Config = toml::from_str("[targets.web]\nhost = \"1.1.1.1\"").unwrap();
+
+        // Too little history (< min_samples): a note, no anomalies.
+        for i in 0..3 {
+            record_in(&dir, "web", &snap(i, 0.3), 0).unwrap();
+        }
+        let mut warming = outcome(9.0);
+        annotate_anomalies(&cfg, &mut warming);
+        let r = warming[0].result.as_ref().unwrap();
+        assert!(r.anomalies.is_empty());
+        assert!(r.anomaly_note.as_deref().unwrap().contains("warming up"));
+
+        // Enough stable history + a spike current reading: flagged.
+        for i in 3..12 {
+            record_in(&dir, "web", &snap(i, 0.3), 0).unwrap();
+        }
+        let mut hot = outcome(9.0);
+        annotate_anomalies(&cfg, &mut hot);
+        let r = hot[0].result.as_ref().unwrap();
+        assert_eq!(r.anomalies.len(), 1);
+        assert_eq!(r.anomalies[0].metric_id, "health-load");
+        assert!(r.anomaly_note.is_none());
+
+        std::env::remove_var("LINUX_AUDIT_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

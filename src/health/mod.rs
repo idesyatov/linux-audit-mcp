@@ -78,6 +78,25 @@ pub struct Metric {
     pub numeric: Option<f64>,
 }
 
+/// A metric reading that deviates from this host's *own* recent norm, detected
+/// by comparing the current value against a robust baseline (median + MAD) over
+/// the stored history (Stage B2, see [`crate::anomaly`]).
+///
+/// Purely informational: an anomaly reflects an unusual workload, not a
+/// hardening regression, so it never changes `overall` nor the exit code.
+#[derive(Debug, Clone, Serialize)]
+pub struct Anomaly {
+    pub metric_id: String,
+    /// The current reading.
+    pub current: f64,
+    /// Robust baseline: median of the recent history window.
+    pub median: f64,
+    /// Signed change versus the baseline, in percent.
+    pub pct_change: f64,
+    /// Modified z-score: deviation from the median in scaled-MAD units.
+    pub z: f64,
+}
+
 /// The full operational-health snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthReport {
@@ -86,6 +105,15 @@ pub struct HealthReport {
     pub top_mem: Vec<ProcInfo>,
     /// Worst status across all metrics (`Unknown` if nothing could be measured).
     pub overall: HealthStatus,
+    /// Metrics that deviate from this host's recent norm. Empty when nothing is
+    /// anomalous, detection is disabled, or the baseline is still warming up.
+    /// Filled in after collection by [`crate::run::annotate_anomalies`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub anomalies: Vec<Anomaly>,
+    /// Human note when no detection ran (disabled, or baseline warming up); a
+    /// transparency hint so an empty `anomalies` is never ambiguous.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anomaly_note: Option<String>,
 }
 
 /// Thresholds for turning raw readings into `Ok`/`Warn`/`Crit`. Each field has a
@@ -422,6 +450,10 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
         top_cpu,
         top_mem,
         overall,
+        // Anomalies need the stored history + per-target config, neither of which
+        // this pure function has; they are filled in by the run orchestration.
+        anomalies: Vec::new(),
+        anomaly_note: None,
     }
 }
 

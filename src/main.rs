@@ -5,6 +5,7 @@
 //! one-shot audit for cron/CI. Audit logic lives in [`audit`]/[`checks`], the
 //! read-only SSH transport in [`ssh`], the command catalog in [`catalog`].
 
+mod anomaly;
 mod audit;
 mod catalog;
 mod checks;

@@ -270,8 +270,11 @@ fn health_exit(outcomes: &[HealthOutcome], fail_on: FailOnStatus) -> i32 {
 pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
     let cfg = load_config(&args.config)?;
     let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
-    let outcomes = run::health_targets(&cfg, &aliases).await?;
+    let mut outcomes = run::health_targets(&cfg, &aliases).await?;
 
+    // Detect anomalies against stored history BEFORE recording this run, so the
+    // fresh reading is never part of its own baseline.
+    run::annotate_anomalies(&cfg, &mut outcomes);
     // Persist each successful snapshot for later trend inspection / baselining.
     // Best-effort: a storage error is logged, never fails the health run.
     history::record_outcomes(&outcomes, !args.no_store);

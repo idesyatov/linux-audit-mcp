@@ -47,6 +47,24 @@ pub fn text(target: &str, report: &HealthReport) -> String {
         );
     }
 
+    // Anomalies (deviation from this host's own norm) - informational only.
+    if !report.anomalies.is_empty() {
+        let _ = writeln!(
+            out,
+            "  ANOMALY vs baseline ({}), informational:",
+            report.anomalies.len()
+        );
+        for a in &report.anomalies {
+            let _ = writeln!(
+                out,
+                "    {:<20} {:.2} vs median {:.2} ({:+.0}%, z={:.1})",
+                a.metric_id, a.current, a.median, a.pct_change, a.z
+            );
+        }
+    } else if let Some(note) = &report.anomaly_note {
+        let _ = writeln!(out, "  (anomaly: {note})");
+    }
+
     let _ = writeln!(out, "  top CPU:");
     for p in &report.top_cpu {
         let _ = writeln!(out, "    {:>7.1}%  {} (pid {})", p.cpu, p.comm, p.pid);
@@ -94,6 +112,31 @@ mod tests {
         assert!(out.contains("not a security score"));
         assert!(out.contains("top CPU:"));
         assert!(out.contains("mysqld"));
+    }
+
+    #[test]
+    fn text_renders_anomaly_section() {
+        use crate::health::Anomaly;
+        let mut r = sample();
+        r.anomalies.push(Anomaly {
+            metric_id: "health-load".to_string(),
+            current: 4.0,
+            median: 0.3,
+            pct_change: 1233.0,
+            z: 12.5,
+        });
+        let out = text("web", &r);
+        assert!(out.contains("ANOMALY vs baseline (1)"));
+        assert!(out.contains("health-load"));
+        assert!(out.contains("z=12.5"));
+    }
+
+    #[test]
+    fn text_shows_warming_up_note_when_no_anomalies() {
+        let mut r = sample();
+        r.anomaly_note = Some("baseline warming up (3/8)".to_string());
+        let out = text("web", &r);
+        assert!(out.contains("baseline warming up (3/8)"));
     }
 
     #[test]
