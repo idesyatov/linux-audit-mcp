@@ -1,6 +1,6 @@
 [package]
 name = "linux-audit-mcp"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Read-only security audit and operational-health checks for Linux servers (MCP + CLI)"
