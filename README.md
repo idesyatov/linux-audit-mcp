@@ -535,7 +535,7 @@ RHEL) is reported as `error` and excluded from the score.
 | kernel    | `kernel-aslr`                  | Medium   | `randomize_va_space` ≠ 2                    |
 | kernel    | `kernel-tcp-syncookies`        | Low      | `tcp_syncookies` ≠ 1                        |
 | kernel    | `kernel-rp-filter`             | Low      | `rp_filter` not 1/2                         |
-| kernel    | `kernel-ip-forward`            | Medium   | `ip_forward` = 1 on a non-router           |
+| kernel    | `kernel-ip-forward`            | Medium   | `ip_forward` = 1 on a non-router (Docker/container hosts are auto-detected and excused) |
 | kernel    | `kernel-accept-redirects`      | Low      | `accept_redirects` = 1                     |
 | kernel    | `kernel-source-route`          | Low      | `accept_source_route` = 1                  |
 | firewall  | `firewall-enabled`             | High     | no firewalld/ufw/nftables enabled          |
