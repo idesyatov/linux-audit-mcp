@@ -19,18 +19,23 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl \
 # ---- runtime: Alpine with only the ssh client, non-root ----
 FROM alpine:3.20
 RUN apk add --no-cache openssh-client \
-    && adduser -D -u 10001 audit
+    && adduser -D -u 10001 audit \
+    # Pre-create the history dir owned by the non-root user, so a mounted volume
+    # (named OR bind) inherits writable ownership - no chmod dance needed.
+    && mkdir -p /data && chown 10001:10001 /data
 COPY --from=build \
     /app/target/x86_64-unknown-linux-musl/release/linux-audit-mcp \
     /usr/local/bin/linux-audit-mcp
 
-# Container conventions, so `docker run` needs only two `-v` mounts and no `-e`:
-# mount the config to /config/targets.toml and the SSH key to /keys/id_ed25519.
+# Container conventions, so `docker run` needs no `-e`: mount the config to
+# /config/targets.toml and the SSH key to /keys/id_ed25519; to persist health
+# history, mount any volume at /data (LINUX_AUDIT_DATA_DIR points there already).
 # HOME is a writable tmpdir (for the secured key copy and known_hosts). The
 # identity override keeps targets.toml host-portable (its own path is ignored).
 ENV HOME=/tmp \
     LINUX_AUDIT_CONFIG=/config/targets.toml \
-    LINUX_AUDIT_IDENTITY_FILE=/keys/id_ed25519
+    LINUX_AUDIT_IDENTITY_FILE=/keys/id_ed25519 \
+    LINUX_AUDIT_DATA_DIR=/data
 
 USER 10001
 # No subcommand = MCP stdio server; logs go to stderr, protocol to stdout.

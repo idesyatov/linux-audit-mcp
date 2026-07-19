@@ -350,15 +350,19 @@ linux-audit-mcp history --target web --limit 50
 | `--config` | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |
 
 Storage location: `$LINUX_AUDIT_DATA_DIR`, else
-`~/.local/share/linux-audit-mcp/history/<alias>.jsonl`. Retention is the newest
-`$LINUX_AUDIT_HISTORY_MAX` snapshots per target (default `1000`; `0` keeps all).
-In Docker, mount a writable volume there to persist history across runs:
+`~/.local/share/linux-audit-mcp/history/<alias>.jsonl`. Retention is automatic —
+only the newest `$LINUX_AUDIT_HISTORY_MAX` snapshots per target are kept
+(default `1000`; `0` keeps all), so the files never grow unbounded.
+
+The image already sets `LINUX_AUDIT_DATA_DIR=/data` and pre-owns `/data` as the
+non-root user, so to persist history across runs just mount **any** volume there
+— one extra `-v`, no `-e`, named or bind:
 
 ```bash
 docker run --rm \
   -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
   -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
-  -v linux-audit-history:/data -e LINUX_AUDIT_DATA_DIR=/data \
+  -v linux-audit-history:/data \
   ghcr.io/idesyatov/linux-audit-mcp:latest health --group all
 ```
 
