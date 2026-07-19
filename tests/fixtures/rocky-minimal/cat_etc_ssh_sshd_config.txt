@@ -2,3 +2,5 @@ PermitRootLogin yes
 PasswordAuthentication yes
 X11Forwarding yes
 MaxAuthTries 3
+Ciphers aes256-ctr,aes128-cbc,3des-cbc
+MACs hmac-sha2-256,hmac-md5

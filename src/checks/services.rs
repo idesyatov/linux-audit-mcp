@@ -86,6 +86,38 @@ impl Check for RpcbindDisabled {
     }
 }
 
+/// fail2ban (brute-force throttling) is not enabled.
+pub struct Fail2banEnabled;
+
+impl Check for Fail2banEnabled {
+    fn id(&self) -> &'static str {
+        "services-fail2ban"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Services
+    }
+    fn title(&self) -> &'static str {
+        "fail2ban not enabled"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Enable fail2ban to throttle brute-force attempts: systemctl enable --now fail2ban \
+         (defense-in-depth; most useful where password auth is reachable)."
+    }
+    fn command(&self) -> &'static str {
+        UNITS_CMD
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        if service_enabled(&parse_unit_files(output), "fail2ban") {
+            Outcome::pass("fail2ban is enabled.")
+        } else {
+            Outcome::fail("fail2ban is not enabled (no brute-force throttling).")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -112,6 +144,23 @@ mod tests {
                 .evaluate("rpcbind.service disabled disabled\n")
                 .status,
             Status::Pass
+        );
+    }
+
+    #[test]
+    fn fail2ban() {
+        assert_eq!(
+            Fail2banEnabled
+                .evaluate("fail2ban.service enabled enabled\n")
+                .status,
+            Status::Pass
+        );
+        // Absent -> not enabled -> fail.
+        assert_eq!(
+            Fail2banEnabled
+                .evaluate("sshd.service enabled enabled\n")
+                .status,
+            Status::Fail
         );
     }
 }

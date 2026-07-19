@@ -104,6 +104,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(ssh::PermitEmptyPasswords),
         Box::new(ssh::X11Forwarding),
         Box::new(ssh::MaxAuthTries),
+        Box::new(ssh::WeakCrypto),
         // accounts
         Box::new(accounts::NonRootUid0),
         Box::new(accounts::PassMaxDays),
@@ -119,9 +120,11 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(firewall::FirewallEnabled),
         // updates
         Box::new(updates::SecurityUpdatesPending),
+        Box::new(updates::AutoUpdatesEnabled),
         // services
         Box::new(services::CleartextPorts),
         Box::new(services::RpcbindDisabled),
+        Box::new(services::Fail2banEnabled),
         // logging
         Box::new(logging::AuditdEnabled),
         Box::new(logging::SyslogEnabled),

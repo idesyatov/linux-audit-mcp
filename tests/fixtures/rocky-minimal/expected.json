@@ -6,6 +6,7 @@
     "ssh-permit-empty-passwords": "pass",
     "ssh-x11-forwarding": "fail",
     "ssh-max-auth-tries": "pass",
+    "ssh-weak-crypto": "fail",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
     "accounts-umask": "pass",
@@ -17,13 +18,15 @@
     "kernel-source-route": "pass",
     "firewall-enabled": "pass",
     "updates-security-pending": "error",
+    "updates-auto-updates": "pass",
     "services-cleartext-ports": "fail",
     "services-rpcbind": "fail",
+    "services-fail2ban": "fail",
     "logging-auditd": "pass",
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 65,
-    "hardened": 55
+    "baseline": 61,
+    "hardened": 51
   }
 }

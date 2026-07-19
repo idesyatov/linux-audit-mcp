@@ -113,7 +113,7 @@ from the score.
 | `audit.rs`       | Runs each distinct command once (cached), then `evaluate()` → findings (pure).  |
 | `checks/mod.rs`  | `Check` trait, `Domain`/`Severity`/`Status`/`Finding`, `all_checks()`.          |
 | `checks/parse.rs`| Tolerant pure parsers (sshd_config, passwd, sysctl, unit-files, ss).            |
-| `checks/*.rs`    | The 20 checks, grouped by domain; each is a pure `evaluate(output) → Outcome`.  |
+| `checks/*.rs`    | The 23 checks, grouped by domain; each is a pure `evaluate(output) → Outcome`.  |
 | `scoring.rs`     | Weighted 0–100 score, `baseline`/`hardened` profiles, severity penalties.       |
 | `report.rs`      | Renders findings + score to text and JSON.                                      |
 | `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O, incl. 2-sample net) and pure `evaluate()`; no score. |

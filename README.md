@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 20 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 23 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -517,7 +517,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-20 checks; each reads one read-only command and applies the tool/OpenSSH default
+23 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score.
 
@@ -528,6 +528,7 @@ RHEL) is reported as `error` and excluded from the score.
 | ssh       | `ssh-permit-empty-passwords`   | High     | `PermitEmptyPasswords yes`                 |
 | ssh       | `ssh-x11-forwarding`           | Low      | `X11Forwarding yes`                        |
 | ssh       | `ssh-max-auth-tries`           | Low      | `MaxAuthTries` > 4                         |
+| ssh       | `ssh-weak-crypto`              | Medium   | weak `Ciphers`/`MACs`/`KexAlgorithms` set  |
 | accounts  | `accounts-nonroot-uid0`        | Critical | a non-`root` account has UID 0             |
 | accounts  | `accounts-pass-max-days`       | Low      | `PASS_MAX_DAYS` > 365 or unset             |
 | accounts  | `accounts-umask`               | Low      | default `UMASK` allows group/other access  |
@@ -539,8 +540,10 @@ RHEL) is reported as `error` and excluded from the score.
 | kernel    | `kernel-source-route`          | Low      | `accept_source_route` = 1                  |
 | firewall  | `firewall-enabled`             | High     | no firewalld/ufw/nftables enabled          |
 | updates   | `updates-security-pending`     | Medium   | pending security updates (apt)             |
+| updates   | `updates-auto-updates`         | Low      | no automatic security-update service on    |
 | services  | `services-cleartext-ports`     | Medium   | telnet/ftp/r-services listening            |
 | services  | `services-rpcbind`             | Low      | `rpcbind` enabled                          |
+| services  | `services-fail2ban`            | Low      | `fail2ban` not enabled                     |
 | logging   | `logging-auditd`               | Low      | `auditd` not enabled                       |
 | logging   | `logging-syslog`               | Low      | no `rsyslog`/`syslog-ng` enabled           |
 

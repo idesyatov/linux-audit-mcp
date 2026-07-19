@@ -4,5 +4,6 @@ firewalld.service          enabled  enabled
 rpcbind.service            enabled  enabled
 rsyslog.service            enabled  enabled
 sshd.service               enabled  enabled
+dnf-automatic-install.service enabled  enabled
 
-5 unit files listed.
+6 unit files listed.

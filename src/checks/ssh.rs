@@ -188,6 +188,96 @@ impl Check for MaxAuthTries {
     }
 }
 
+/// Substrings marking a weak SSH algorithm across ciphers, MACs and key
+/// exchange. Case-insensitive; matched against each comma-separated token of
+/// `Ciphers`, `MACs` and `KexAlgorithms`. Because cipher/MAC/kex names don't
+/// share these fragments, one combined set is safe (a cipher never contains
+/// `sha1`, a MAC never contains `-cbc`, etc.).
+const WEAK_ALGO_MARKERS: &[&str] = &[
+    // ciphers
+    "-cbc",
+    "arcfour",
+    "3des",
+    "rc4",
+    "blowfish",
+    "cast128",
+    // MACs
+    "md5",
+    "sha1",
+    "-96",
+    "umac-64",
+    // key exchange
+    "group1-sha1",
+    "group-exchange-sha1",
+    "gss-",
+    "rsa1024",
+];
+
+/// Weak SSH ciphers/MACs/key-exchange algorithms are configured. Unprivileged:
+/// only what's *explicitly* set in sshd_config is judged - the effective set
+/// (compiled defaults + `Match` blocks) needs `sshd -T` and root, so an absent
+/// directive is reported as a pass with that caveat.
+pub struct WeakCrypto;
+
+impl WeakCrypto {
+    /// Weak tokens across the three algorithm directives. A leading `-` value
+    /// (`Ciphers -*-cbc`) *removes* algorithms from the defaults, which is
+    /// hardening, so it is never flagged; `+`/`^` (add/prepend) are still judged.
+    fn weak_tokens(output: &str) -> Vec<String> {
+        let cfg = parse_sshd_config(output);
+        let mut weak = Vec::new();
+        for key in ["ciphers", "macs", "kexalgorithms"] {
+            let Some(val) = cfg.get(key) else { continue };
+            let val = val.trim();
+            if val.starts_with('-') {
+                continue; // removing algorithms from the default set
+            }
+            let val = val.strip_prefix(['+', '^']).unwrap_or(val);
+            for tok in val.split(',').map(|t| t.trim().to_ascii_lowercase()) {
+                if !tok.is_empty() && WEAK_ALGO_MARKERS.iter().any(|m| tok.contains(m)) {
+                    weak.push(tok);
+                }
+            }
+        }
+        weak
+    }
+}
+
+impl Check for WeakCrypto {
+    fn id(&self) -> &'static str {
+        "ssh-weak-crypto"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "Weak SSH ciphers/MACs/key exchange"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Remove legacy algorithms (CBC ciphers, arcfour/3DES, HMAC-MD5/SHA1, \
+         DH-group1/14-SHA1) from Ciphers/MACs/KexAlgorithms."
+    }
+    fn command(&self) -> &'static str {
+        SSHD_CMD
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let weak = Self::weak_tokens(output);
+        if weak.is_empty() {
+            Outcome::pass(
+                "No weak SSH algorithms explicitly configured (effective set needs sshd -T).",
+            )
+        } else {
+            Outcome::fail(format!(
+                "Weak SSH algorithms configured: {}.",
+                weak.join(", ")
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -197,13 +287,19 @@ mod tests {
         PasswordAuthentication no\n\
         PermitEmptyPasswords no\n\
         X11Forwarding no\n\
-        MaxAuthTries 3\n";
+        MaxAuthTries 3\n\
+        Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com\n\
+        MACs hmac-sha2-512-etm@openssh.com\n\
+        KexAlgorithms curve25519-sha256\n";
 
     const OPEN: &str = "PermitRootLogin yes\n\
         PasswordAuthentication yes\n\
         PermitEmptyPasswords yes\n\
         X11Forwarding yes\n\
-        MaxAuthTries 10\n";
+        MaxAuthTries 10\n\
+        Ciphers aes256-ctr,aes128-cbc,3des-cbc\n\
+        MACs hmac-sha2-256,hmac-md5\n\
+        KexAlgorithms curve25519-sha256,diffie-hellman-group1-sha1\n";
 
     // Only comments: every directive falls back to its OpenSSH default.
     const DEFAULTS: &str = "# stock config\n";
@@ -252,5 +348,21 @@ mod tests {
         assert_eq!(MaxAuthTries.evaluate(OPEN).status, Status::Fail);
         // Default is 6 (> 4).
         assert_eq!(MaxAuthTries.evaluate(DEFAULTS).status, Status::Fail);
+    }
+
+    #[test]
+    fn weak_crypto() {
+        assert_eq!(WeakCrypto.evaluate(HARDENED).status, Status::Pass);
+        assert_eq!(WeakCrypto.evaluate(OPEN).status, Status::Fail);
+        // Unset directives -> pass (effective set needs root/sshd -T).
+        assert_eq!(WeakCrypto.evaluate(DEFAULTS).status, Status::Pass);
+        // A leading `-` value removes weak algos from the defaults -> not flagged.
+        assert_eq!(
+            WeakCrypto.evaluate("Ciphers -aes128-cbc,3des-cbc\n").status,
+            Status::Pass
+        );
+        // The detail names the offending algorithms.
+        let d = WeakCrypto.evaluate(OPEN).detail;
+        assert!(d.contains("aes128-cbc") && d.contains("hmac-md5"), "{d}");
     }
 }

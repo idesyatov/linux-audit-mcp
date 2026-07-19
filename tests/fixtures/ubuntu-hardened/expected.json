@@ -6,6 +6,7 @@
     "ssh-permit-empty-passwords": "pass",
     "ssh-x11-forwarding": "pass",
     "ssh-max-auth-tries": "pass",
+    "ssh-weak-crypto": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "pass",
     "accounts-umask": "pass",
@@ -17,8 +18,10 @@
     "kernel-source-route": "pass",
     "firewall-enabled": "pass",
     "updates-security-pending": "pass",
+    "updates-auto-updates": "pass",
     "services-cleartext-ports": "pass",
     "services-rpcbind": "pass",
+    "services-fail2ban": "pass",
     "logging-auditd": "pass",
     "logging-syslog": "pass"
   },
