@@ -12,6 +12,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use crate::checks::{Finding, Severity, Status};
 use crate::config::{self, Config};
 use crate::health::{self, HealthStatus};
+use crate::history;
 use crate::report;
 use crate::run::{self, AuditOutcome, HealthOutcome};
 use crate::scoring::{Profile, Score};
@@ -35,6 +36,8 @@ pub enum Command {
     Audit(AuditArgs),
     /// Take an operational-health snapshot of a target or group (for cron/CI).
     Health(HealthArgs),
+    /// Show the recorded health-snapshot history for a target (trend inspection).
+    History(HistoryArgs),
 }
 
 #[derive(Args)]
@@ -91,6 +94,29 @@ pub struct HealthArgs {
     /// Exit 2 when the overall health status is at least this severe (`off` disables).
     #[arg(long, value_enum, default_value = "off")]
     fail_on_status: FailOnStatus,
+
+    /// Do not append these snapshots to the on-disk health history.
+    #[arg(long)]
+    no_store: bool,
+}
+
+#[derive(Args)]
+pub struct HistoryArgs {
+    /// Target alias whose recorded history to show.
+    #[arg(long)]
+    target: String,
+
+    /// Show at most this many most-recent snapshots (0 for all).
+    #[arg(long, default_value = "20")]
+    limit: usize,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "text")]
+    format: Format,
+
+    /// Path to the target config (defaults to $LINUX_AUDIT_CONFIG or the standard location).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -246,6 +272,10 @@ pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
     let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
     let outcomes = run::health_targets(&cfg, &aliases).await?;
 
+    // Persist each successful snapshot for later trend inspection / baselining.
+    // Best-effort: a storage error is logged, never fails the health run.
+    history::record_outcomes(&outcomes, !args.no_store);
+
     match &group {
         None => {
             let o = &outcomes[0];
@@ -264,6 +294,22 @@ pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
     }
 
     Ok(health_exit(&outcomes, args.fail_on_status))
+}
+
+/// Print the recorded health-snapshot history for a target. Reads local files
+/// only (no SSH); the alias is validated against the config to catch typos.
+pub fn run_history(args: HistoryArgs) -> anyhow::Result<i32> {
+    let cfg = load_config(&args.config)?;
+    if !cfg.targets.contains_key(&args.target) {
+        anyhow::bail!("unknown target {:?}", args.target);
+    }
+    let snaps = history::read_recent(&args.target, args.limit)
+        .with_context(|| format!("reading health history for {:?}", args.target))?;
+    match args.format {
+        Format::Text => print!("{}", history::text(&args.target, &snaps)),
+        Format::Json => println!("{}", history::json(&args.target, &snaps)?),
+    }
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -378,6 +424,36 @@ mod tests {
                 assert_eq!(a.target.as_deref(), Some("web"));
                 assert!(matches!(a.fail_on_status, FailOnStatus::Off)); // cron-friendly default
             }
+            _ => panic!("expected health subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_history_subcommand() {
+        let cli = Cli::try_parse_from(["linux-audit-mcp", "history", "--target", "web"]).unwrap();
+        match cli.command {
+            Some(Command::History(a)) => {
+                assert_eq!(a.target, "web");
+                assert_eq!(a.limit, 20); // default
+            }
+            _ => panic!("expected history subcommand"),
+        }
+        // --target is required.
+        assert!(Cli::try_parse_from(["linux-audit-mcp", "history"]).is_err());
+    }
+
+    #[test]
+    fn health_no_store_defaults_off() {
+        let on = Cli::try_parse_from(["linux-audit-mcp", "health", "--target", "web"]).unwrap();
+        match on.command {
+            Some(Command::Health(a)) => assert!(!a.no_store), // stores by default
+            _ => panic!("expected health subcommand"),
+        }
+        let off =
+            Cli::try_parse_from(["linux-audit-mcp", "health", "--target", "web", "--no-store"])
+                .unwrap();
+        match off.command {
+            Some(Command::Health(a)) => assert!(a.no_store),
             _ => panic!("expected health subcommand"),
         }
     }

@@ -14,7 +14,7 @@ use rmcp::{
 };
 
 use crate::scoring::Profile;
-use crate::{config, health, report, run};
+use crate::{config, health, history, report, run};
 
 #[derive(Clone)]
 pub(crate) struct AuditServer {
@@ -158,6 +158,10 @@ impl AuditServer {
         let outcomes = run::health_targets(&cfg, &aliases)
             .await
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+        // Persist each successful snapshot so the recurring "pulse" builds up
+        // per-host history for later baselining. Best-effort (errors are logged).
+        history::record_outcomes(&outcomes, true);
 
         let (text, json) = match &group {
             None => {

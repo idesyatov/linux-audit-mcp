@@ -321,9 +321,46 @@ linux-audit-mcp health --target web            # text (default) or --format json
 | `--format`        | `text` (default) \| `json`.                                    |
 | `--config`        | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default). |
 | `--fail-on-status`| Exit 2 when overall status is at least `warn` / `crit`. `off` (default) never gates. |
+| `--no-store`      | Do not append this snapshot to the on-disk history.            |
 
-Thresholds are per-target (see **Configuration**); a snapshot is momentary, so
-true anomaly/baseline detection is intentionally out of scope for now.
+Thresholds are per-target (see **Configuration**). Each snapshot is also
+**recorded** to a per-target history file (see below) so trends accumulate over
+time; today those readings are compared only against the static thresholds —
+per-host baseline/anomaly detection over the history is a future step.
+
+</details>
+
+<details>
+<summary><b>Health history</b></summary>
+
+Every `health` run (and every `inspect_load` MCP call) appends its snapshot to an
+append-only JSONL file per target — one line per run — so you can inspect trends.
+`history` prints the recent readings:
+
+```bash
+linux-audit-mcp history --target web              # text table (or --format json)
+linux-audit-mcp history --target web --limit 50
+```
+
+| Option     | Description                                                          |
+| ---------- | ------------------------------------------------------------------- |
+| `--target` | Target alias whose recorded history to show (required).             |
+| `--limit`  | Most-recent snapshots to show (default `20`; `0` for all).          |
+| `--format` | `text` (default) \| `json`.                                         |
+| `--config` | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |
+
+Storage location: `$LINUX_AUDIT_DATA_DIR`, else
+`~/.local/share/linux-audit-mcp/history/<alias>.jsonl`. Retention is the newest
+`$LINUX_AUDIT_HISTORY_MAX` snapshots per target (default `1000`; `0` keeps all).
+In Docker, mount a writable volume there to persist history across runs:
+
+```bash
+docker run --rm \
+  -v ~/.config/linux-audit-mcp/targets.toml:/config/targets.toml:ro \
+  -v ~/.ssh/audit_ed25519:/keys/id_ed25519:ro \
+  -v linux-audit-history:/data -e LINUX_AUDIT_DATA_DIR=/data \
+  ghcr.io/idesyatov/linux-audit-mcp:latest health --group all
+```
 
 </details>
 

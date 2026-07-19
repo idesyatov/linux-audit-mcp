@@ -39,7 +39,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, NETDEV];
 
 /// A metric's verdict against its thresholds. `Unknown` means the input was
 /// missing or unparseable - it never counts toward the overall status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     Ok,
@@ -70,6 +70,12 @@ pub struct Metric {
     pub value: String,
     /// Extra context (worst mount, thresholds crossed, ...).
     pub detail: String,
+    /// Primary numeric reading, if this metric has one (load per core, memory
+    /// percent, worst-disk percent, ...). Used only to persist history
+    /// ([`crate::history`]); skipped in the report JSON so the wire format and
+    /// the evals stay unchanged. `None` for `Unknown` metrics.
+    #[serde(skip)]
+    pub numeric: Option<f64>,
 }
 
 /// The full operational-health snapshot.
@@ -139,6 +145,7 @@ fn unknown(id: &'static str, title: &'static str, why: impl Into<String>) -> Met
         status: HealthStatus::Unknown,
         value: "n/a".to_string(),
         detail: why.into(),
+        numeric: None,
     }
 }
 
@@ -182,6 +189,7 @@ fn load_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
             "1m {:.2}, 5m {:.2}, 15m {:.2} over {cores} core(s)",
             la[0], la[1], la[2]
         ),
+        numeric: Some(per_core),
     }
 }
 
@@ -221,6 +229,7 @@ fn memory_metrics(outputs: &Outputs, thr: &Thresholds) -> Vec<Metric> {
             human_bytes(free.mem_total),
             human_bytes(free.mem_available)
         ),
+        numeric: Some(mem_used_pct),
     };
     let swap = if free.swap_total == 0 {
         Metric {
@@ -229,6 +238,7 @@ fn memory_metrics(outputs: &Outputs, thr: &Thresholds) -> Vec<Metric> {
             status: HealthStatus::Ok,
             value: "no swap".to_string(),
             detail: "no swap configured".to_string(),
+            numeric: Some(0.0),
         }
     } else {
         let swap_pct = free.swap_used as f64 / free.swap_total as f64 * 100.0;
@@ -246,6 +256,7 @@ fn memory_metrics(outputs: &Outputs, thr: &Thresholds) -> Vec<Metric> {
                 human_bytes(free.swap_used),
                 human_bytes(free.swap_total)
             ),
+            numeric: Some(swap_pct),
         }
     };
     vec![mem, swap]
@@ -275,6 +286,7 @@ fn disk_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
         ),
         value: format!("{}% on {}", worst.use_pct, worst.mount),
         detail: detail.join(", "),
+        numeric: Some(worst.use_pct as f64),
     }
 }
 
@@ -292,6 +304,7 @@ fn network_metric(outputs: &Outputs) -> Metric {
         status: HealthStatus::Ok,
         value: format!("{} established", s.tcp_estab),
         detail: format!("{} sockets total", s.total),
+        numeric: Some(s.tcp_estab as f64),
     }
 }
 
@@ -368,6 +381,8 @@ fn net_throughput_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> 
         status,
         value: format!("{name} rx {rx:.2} / tx {tx:.2} MiB/s"),
         detail: format!("MiB/s over {dt_secs:.1}s: {detail}"),
+        // Busiest interface's combined MiB/s - one scalar for history/baselining.
+        numeric: Some(rx + tx),
     }
 }
 

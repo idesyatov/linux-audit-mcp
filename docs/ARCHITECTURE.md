@@ -95,9 +95,9 @@ from the score.
 
 | Module           | Responsibility                                                                 |
 | ---------------- | ------------------------------------------------------------------------------ |
-| `main.rs`        | Wires modules; routes CLI (no subcommand → `serve`, `audit`/`health` → one-shot).|
+| `main.rs`        | Wires modules; routes CLI (no subcommand → `serve`, `audit`/`health`/`history` → one-shot).|
 | `server.rs`      | MCP stdio server; tools `ping`, `run_audit`, `inspect_load` (target **alias**).  |
-| `cli.rs`         | `audit`/`health` subcommands: flags, `--format`, exit-code gates.                |
+| `cli.rs`         | `audit`/`health`/`history` subcommands: flags, `--format`, exit-code gates.      |
 | `config.rs`      | Operator inventory (`targets.toml`): targets + groups; `resolve(alias)` merges host/group/default vars; `group_members`. |
 | `run.rs`         | Fan-out: run audit/health over one target or a group's members concurrently; per-host error capture; group text/JSON rendering. |
 | `ssh.rs`         | SSH transport via `tokio::process`; key-only, timeouts; validates then sends.   |
@@ -111,6 +111,7 @@ from the score.
 | `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O, incl. 2-sample net) and pure `evaluate()`; no score. |
 | `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s, /proc/net/dev).             |
 | `health/report.rs`| Renders the health snapshot (`OK`/`WARN`/`CRIT`) to text and JSON.              |
+| `history.rs`     | Persists each health snapshot as append-only JSONL per target (`$LINUX_AUDIT_DATA_DIR`); `history` subcommand lists it. File-based, no DB; baselining over it is a later stage. |
 | `evals.rs`       | (test-only) per-distro fixture regression tests (audit **and** health).         |
 
 ## The read-only trust boundary 🔒
