@@ -44,6 +44,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "ss -s",
     // Network interface counters; sampled twice to derive throughput.
     "cat /proc/net/dev",
+    // CPU/IO pressure (Stage B3): `1 2` = one 1-second sample; the last row is
+    // the current delta. Unprivileged and read-only.
+    "vmstat 1 2",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)

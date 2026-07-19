@@ -5,6 +5,7 @@
     "health-memory": "ok",
     "health-swap": "ok",
     "health-disk": "crit",
+    "health-iowait": "crit",
     "health-connections": "ok"
   },
   "overall": "crit"

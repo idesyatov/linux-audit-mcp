@@ -24,18 +24,21 @@ const FREE: &str = "free -b";
 const DF: &str = "df -P";
 const PS: &str = "ps -eo pid,comm,pcpu,pmem --sort=-pcpu";
 const SS: &str = "ss -s";
+/// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
+/// single-shot command whose last row is the current delta (parsed in [`evaluate`]).
+const VMSTAT: &str = "vmstat 1 2";
 /// Sampled twice (not single-shot) to derive throughput, so it is handled apart
 /// from [`SINGLE_SHOT`] in [`collect`] and produces no metric in [`evaluate`].
 const NETDEV: &str = "cat /proc/net/dev";
 
 /// Commands snapped exactly once per snapshot.
-const SINGLE_SHOT: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS];
+const SINGLE_SHOT: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, VMSTAT];
 
 /// Every read-only command the health snapshot may issue (each must be in the
 /// catalog; see the invariant test). Consumed only by the invariant test and
 /// evals; the run path uses [`SINGLE_SHOT`] plus [`NETDEV`].
 #[allow(dead_code)]
-pub const HEALTH_COMMANDS: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, NETDEV];
+pub const HEALTH_COMMANDS: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, VMSTAT, NETDEV];
 
 /// A metric's verdict against its thresholds. `Unknown` means the input was
 /// missing or unparseable - it never counts toward the overall status.
@@ -133,6 +136,10 @@ pub struct Thresholds {
     /// Filesystem capacity (percent).
     pub disk_warn_pct: u8,
     pub disk_crit_pct: u8,
+    /// CPU time waiting on I/O (`wa`, percent); a sustained high value means the
+    /// host is disk-bound.
+    pub iowait_warn_pct: f64,
+    pub iowait_crit_pct: f64,
     /// Per-interface network throughput (MiB/s). `0` disables that bound, so
     /// network is informational (always `Ok`) unless a threshold is set.
     pub net_rx_warn_mibps: f64,
@@ -156,6 +163,8 @@ impl Default for Thresholds {
             swap_used_crit_pct: 90,
             disk_warn_pct: 85,
             disk_crit_pct: 95,
+            iowait_warn_pct: 20.0,
+            iowait_crit_pct: 50.0,
             net_rx_warn_mibps: 0.0,
             net_rx_crit_mibps: 0.0,
             net_tx_warn_mibps: 0.0,
@@ -318,6 +327,22 @@ fn disk_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
     }
 }
 
+fn iowait_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-iowait";
+    const TITLE: &str = "IO wait";
+    let Some(v) = out(outputs, VMSTAT).and_then(parse::parse_vmstat) else {
+        return unknown(ID, TITLE, "vmstat unavailable");
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(v.iowait, thr.iowait_warn_pct, thr.iowait_crit_pct),
+        value: format!("{:.0}% iowait", v.iowait),
+        detail: format!("{} proc(s) blocked, {:.0}% steal", v.blocked, v.steal),
+        numeric: Some(v.iowait),
+    }
+}
+
 fn network_metric(outputs: &Outputs) -> Metric {
     const ID: &str = "health-connections";
     const TITLE: &str = "Network connections";
@@ -431,6 +456,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     let mut metrics = vec![load_metric(outputs, thr)];
     metrics.extend(memory_metrics(outputs, thr));
     metrics.push(disk_metric(outputs, thr));
+    metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
@@ -569,6 +595,35 @@ mod tests {
         let thr = Thresholds::default();
         let m = load_metric(&outputs(&[]), &thr);
         assert_eq!(m.status, HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn iowait_thresholds() {
+        let thr = Thresholds::default();
+        let vm = |wa: u32| {
+            format!(
+                "r b swpd free buff cache si so bi bo in cs us sy id wa st\n\
+                 1 0 0 100 100 100 0 0 10 20 100 200 5 2 90 {wa} 0\n"
+            )
+        };
+        let (ok, warn, crit) = (vm(5), vm(30), vm(60));
+        assert_eq!(
+            iowait_metric(&outputs(&[("vmstat 1 2", ok.as_str())]), &thr).status,
+            HealthStatus::Ok
+        );
+        assert_eq!(
+            iowait_metric(&outputs(&[("vmstat 1 2", warn.as_str())]), &thr).status,
+            HealthStatus::Warn
+        );
+        assert_eq!(
+            iowait_metric(&outputs(&[("vmstat 1 2", crit.as_str())]), &thr).status,
+            HealthStatus::Crit
+        );
+        // Missing vmstat -> Unknown (never gates).
+        assert_eq!(
+            iowait_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
     }
 
     #[test]

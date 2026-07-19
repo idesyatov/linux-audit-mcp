@@ -5,6 +5,7 @@
     "health-memory": "warn",
     "health-swap": "ok",
     "health-disk": "warn",
+    "health-iowait": "warn",
     "health-connections": "ok"
   },
   "overall": "warn"

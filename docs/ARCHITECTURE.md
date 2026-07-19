@@ -117,7 +117,7 @@ from the score.
 | `scoring.rs`     | Weighted 0–100 score, `baseline`/`hardened` profiles, severity penalties.       |
 | `report.rs`      | Renders findings + score to text and JSON.                                      |
 | `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O, incl. 2-sample net) and pure `evaluate()`; no score. |
-| `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s, /proc/net/dev).             |
+| `health/parse.rs`| Tolerant pure parsers (uptime, free, df, ps, ss -s, /proc/net/dev, vmstat).      |
 | `health/report.rs`| Renders the health snapshot (`OK`/`WARN`/`CRIT`) to text and JSON.              |
 | `history.rs`     | Persists each health snapshot as append-only JSONL per target (`$LINUX_AUDIT_DATA_DIR`); `history` subcommand lists it. File-based, no DB.          |
 | `anomaly.rs`     | Per-host anomaly detection over history: robust baseline (median + MAD), modified z-score + materiality gate. Pure; owns `AnomalyConfig` (imported by `config.rs`, no cycle). Informational — never touches score/status/exit. |

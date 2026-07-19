@@ -251,6 +251,8 @@ swap_used_warn_pct = 50   # swap in use (%)
 swap_used_crit_pct = 90
 disk_warn_pct = 85        # filesystem capacity (%)
 disk_crit_pct = 95
+iowait_warn_pct = 20.0    # CPU time waiting on I/O (%) — host is disk-bound
+iowait_crit_pct = 50.0
 net_rx_warn_mibps = 0.0   # per-interface throughput (MiB/s); 0 disables (informational)
 net_rx_crit_mibps = 0.0
 net_tx_warn_mibps = 0.0
@@ -276,7 +278,7 @@ window = 100        # most-recent snapshots forming the baseline
 Create the unprivileged `auditor` user reachable by your key — see **Quick start ›
 step 1**. No `sudoers` entry is needed (the audit is read-only). Standard tools are
 expected on the target: `sshd_config`, `getent`, `sysctl`, `ss`, `systemctl`,
-`uptime`, `free`, `df`, `ps`, and (Debian/Ubuntu) `apt-get`.
+`uptime`, `free`, `df`, `ps`, `vmstat`, and (Debian/Ubuntu) `apt-get`.
 
 </details>
 
@@ -560,12 +562,14 @@ reported `UNKNOWN` and never gates.
 | `health-memory`       | `free -b`                                  | memory in use % ≥ threshold              |
 | `health-swap`         | `free -b`                                  | swap in use % ≥ threshold                |
 | `health-disk`         | `df -P`                                    | worst real filesystem % ≥ threshold      |
+| `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 
-Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Network throughput is a rate,
-so it samples the interface counters **twice** (`net_sample_secs` apart, ~1s) and
-reports the delta — the snapshot therefore takes about a second longer. Each
+Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Two metrics need a timed
+sample: `vmstat 1 2` takes a one-second CPU sample for I/O-wait, and network
+throughput samples the interface counters **twice** (`net_sample_secs` apart, ~1s)
+for the delta — so the snapshot takes a second or two longer. Each
 reading is also compared against the host's recorded baseline (median + MAD) — see
 **Anomaly detection**.
 

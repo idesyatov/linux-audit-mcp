@@ -220,6 +220,54 @@ pub fn parse_ss_summary(output: &str) -> Option<SocketSummary> {
     })
 }
 
+/// CPU-pressure figures from the current (second) sample of `vmstat 1 2`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VmStat {
+    /// `wa`: percent of CPU time waiting on I/O.
+    pub iowait: f64,
+    /// `st`: percent of CPU time stolen by the hypervisor (0 if absent).
+    pub steal: f64,
+    /// `b`: processes blocked on I/O.
+    pub blocked: u64,
+}
+
+/// Parse `vmstat 1 2`. The column header (`... us sy id wa st`) is located by
+/// name, so field order variations are tolerated, and the *last* all-numeric row
+/// is used - i.e. the one-second delta, not the since-boot average in row one.
+pub fn parse_vmstat(output: &str) -> Option<VmStat> {
+    // Column indices for wa/st/b, taken from the name header.
+    let mut cols: Option<(usize, Option<usize>, Option<usize>)> = None;
+    let mut last_data: Option<Vec<f64>> = None;
+    for line in output.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.is_empty() {
+            continue;
+        }
+        // The name header is the row that labels the `wa` column.
+        if toks.contains(&"wa") {
+            let idx = |name: &str| toks.iter().position(|t| *t == name);
+            if let Some(wa) = idx("wa") {
+                cols = Some((wa, idx("st"), idx("b")));
+            }
+            continue;
+        }
+        // A data row is all-numeric; keep the last one seen.
+        if toks.iter().all(|t| t.parse::<f64>().is_ok()) {
+            last_data = Some(toks.iter().filter_map(|t| t.parse().ok()).collect());
+        }
+    }
+    let (wa_i, st_i, b_i) = cols?;
+    let data = last_data?;
+    Some(VmStat {
+        iowait: *data.get(wa_i)?,
+        steal: st_i.and_then(|i| data.get(i)).copied().unwrap_or(0.0),
+        blocked: b_i
+            .and_then(|i| data.get(i))
+            .map(|v| *v as u64)
+            .unwrap_or(0),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +343,33 @@ mod tests {
         let s = parse_ss_summary(out).unwrap();
         assert_eq!(s.total, 230);
         assert_eq!(s.tcp_estab, 8);
+    }
+
+    #[test]
+    fn vmstat_uses_last_sample_by_column_name() {
+        let out = "procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----\n\
+                   \x20r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st\n\
+                   \x201  0      0 600000 200000 150000    0    0     5    12   90  180  3  1 95  1  0\n\
+                   \x204  2      0 590000 200000 150000    0    0   200   500  450  900 12  6 57 25  0\n";
+        let v = parse_vmstat(out).unwrap();
+        assert_eq!(v.iowait, 25.0); // second (delta) row, not the boot average
+        assert_eq!(v.blocked, 2);
+        assert_eq!(v.steal, 0.0);
+    }
+
+    #[test]
+    fn vmstat_without_steal_column() {
+        // Older/no-virt vmstat may omit `st`; steal defaults to 0.
+        let out = " r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa\n\
+                   \x203  1      0 800000 100000 300000    0    0   120   340  400  800 10  5 60 25\n";
+        let v = parse_vmstat(out).unwrap();
+        assert_eq!(v.iowait, 25.0);
+        assert_eq!(v.steal, 0.0);
+    }
+
+    #[test]
+    fn vmstat_garbage_is_none() {
+        assert_eq!(parse_vmstat("no header here\n1 2 3\n"), None);
     }
 
     #[test]
