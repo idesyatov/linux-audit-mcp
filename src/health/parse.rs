@@ -143,7 +143,8 @@ pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
         .collect()
 }
 
-/// Cumulative RX/TX byte counters for one interface, from `/proc/net/dev`.
+/// Cumulative RX/TX counters for one interface, from `/proc/net/dev`: bytes,
+/// packets, errors and drops per direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetCounters {
     pub rx_bytes: u64,

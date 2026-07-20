@@ -100,7 +100,8 @@ impl Check for DefaultUmask {
         Severity::Low
     }
     fn recommendation(&self) -> &'static str {
-        "Set UMASK 027 (or 077) in /etc/login.defs so new files aren't world/group-readable."
+        "Set UMASK 027 (or 077) in /etc/login.defs so new files aren't world-readable \
+         (027 still allows group read → 640; 077 removes group access too → 600)."
     }
     fn command(&self) -> &'static str {
         LOGIN_DEFS_CMD
@@ -112,7 +113,8 @@ impl Check for DefaultUmask {
             .cloned()
             .unwrap_or_else(|| "022".to_string());
         match u32::from_str_radix(raw.trim(), 8) {
-            // Group and other must have no access -> those bits set in the mask.
+            // Require the mask to strip group write and all `other` access (bits
+            // 0o027): 027 -> 640 (group may still read), 077 -> 600.
             Ok(mask) if mask & 0o027 == 0o027 => Outcome::pass(format!("UMASK is {raw}.")),
             Ok(_) => Outcome::fail(format!("UMASK is {raw} (too permissive; use 027 or 077).")),
             Err(_) => Outcome::fail(format!("UMASK is not octal: {raw:?}.")),

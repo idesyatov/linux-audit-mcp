@@ -1,9 +1,7 @@
 //! Logging-domain checks (`systemctl list-unit-files`).
 
 use super::parse::{parse_unit_files, service_enabled};
-use super::{Check, Domain, Outcome, Severity};
-
-const UNITS_CMD: &str = "systemctl list-unit-files --type=service --no-pager";
+use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
 
 /// The kernel audit daemon (`auditd`) is not enabled.
 pub struct AuditdEnabled;

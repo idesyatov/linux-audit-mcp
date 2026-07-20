@@ -5,7 +5,8 @@
 //! Deliberately kept separate from [`crate::checks`]/[`crate::scoring`]: health
 //! is momentary and workload-dependent, not a hardening fact, so it produces
 //! `Ok`/`Warn`/`Crit` metrics against thresholds and never feeds the 0-100
-//! security score. True baselining/anomaly detection is a later stage.
+//! security score. Baselining and anomaly detection over the recorded history
+//! live in [`crate::anomaly`] (wired in by [`crate::run::annotate_anomalies`]).
 
 pub mod parse;
 pub mod report;
@@ -27,8 +28,9 @@ const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
 /// single-shot command whose last row is the current delta (parsed in [`evaluate`]).
 const VMSTAT: &str = "vmstat 1 2";
-/// Sampled twice (not single-shot) to derive throughput, so it is handled apart
-/// from [`SINGLE_SHOT`] in [`collect`] and produces no metric in [`evaluate`].
+/// Sampled twice (not single-shot) to derive throughput and error rate, so it is
+/// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
+/// [`evaluate`].
 const NETDEV: &str = "cat /proc/net/dev";
 
 /// Commands snapped exactly once per snapshot.
@@ -61,6 +63,16 @@ impl HealthStatus {
             Self::Crit => 3,
         }
     }
+
+    /// Short uppercase tag for text reports (`OK`/`WARN`/`CRIT`/`UNKN`).
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::Warn => "WARN",
+            Self::Crit => "CRIT",
+            Self::Unknown => "UNKN",
+        }
+    }
 }
 
 /// A single health reading.
@@ -83,7 +95,7 @@ pub struct Metric {
 
 /// A metric reading that deviates from this host's *own* recent norm, detected
 /// by comparing the current value against a robust baseline (median + MAD) over
-/// the stored history (Stage B2, see [`crate::anomaly`]).
+/// the stored history (see [`crate::anomaly`]).
 ///
 /// Purely informational: an anomaly reflects an unusual workload, not a
 /// hardening regression, so it never changes `overall` nor the exit code.
@@ -247,12 +259,16 @@ fn memory_metrics(outputs: &Outputs, thr: &Thresholds) -> Vec<Metric> {
         ];
     };
     // Prefer `available` for real pressure; fall back to `used` on old procps.
+    // One `used_bytes` drives both the percent and the detail so they agree.
+    let used_bytes = if free.mem_available > 0 {
+        free.mem_total.saturating_sub(free.mem_available)
+    } else {
+        free.mem_used
+    };
     let mem_used_pct = if free.mem_total == 0 {
         0.0
-    } else if free.mem_available > 0 {
-        (free.mem_total.saturating_sub(free.mem_available)) as f64 / free.mem_total as f64 * 100.0
     } else {
-        free.mem_used as f64 / free.mem_total as f64 * 100.0
+        used_bytes as f64 / free.mem_total as f64 * 100.0
     };
     let mem = Metric {
         id: MEM_ID,
@@ -265,11 +281,7 @@ fn memory_metrics(outputs: &Outputs, thr: &Thresholds) -> Vec<Metric> {
         value: format!("{mem_used_pct:.0}% used"),
         detail: format!(
             "{} of {} in use (available {})",
-            human_bytes(
-                free.mem_total
-                    .saturating_sub(free.mem_available)
-                    .max(free.mem_used)
-            ),
+            human_bytes(used_bytes),
             human_bytes(free.mem_total),
             human_bytes(free.mem_available)
         ),
@@ -356,8 +368,8 @@ fn network_metric(outputs: &Outputs) -> Metric {
     let Some(s) = out(outputs, SS).and_then(parse::parse_ss_summary) else {
         return unknown(ID, TITLE, "ss unavailable");
     };
-    // Informational in Stage A: without a per-host baseline there is no
-    // meaningful threshold, so this reports the count as Ok.
+    // Informational: the raw connection count has no universal threshold, so it
+    // reports as Ok; an unusual count is surfaced by the anomaly layer instead.
     Metric {
         id: ID,
         title: TITLE,
@@ -529,8 +541,8 @@ fn worst(metrics: &[Metric]) -> HealthStatus {
 }
 
 /// Build a health report from pre-collected command outputs. Pure (no I/O):
-/// shared by [`collect`] and the evals. Does not include network throughput,
-/// which needs two timed samples (added in [`collect`]).
+/// shared by [`collect`] and the evals. Does not include the network throughput
+/// or error metrics, which need two timed samples (added in [`collect`]).
 pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     let mut metrics = vec![load_metric(outputs, thr)];
     metrics.extend(memory_metrics(outputs, thr));

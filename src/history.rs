@@ -1,12 +1,12 @@
-//! Persistence of operational-health snapshots per target (Stage B1).
+//! Persistence of operational-health snapshots per target.
 //!
 //! Append-only JSONL, one file per target alias (`<alias>.jsonl`), one snapshot
 //! per line. Deliberately file-based - no database dependency - so the static
 //! musl build (no C bindings) and the non-root Docker image stay simple, and the
 //! history is human-inspectable and trivially mounted as a volume.
 //!
-//! This stage only records and lists history; baselining/anomaly detection over
-//! it is Stage B2, so nothing here computes a norm or flags a deviation yet.
+//! This module only records and lists history; the baselining/anomaly detection
+//! over it lives in [`crate::anomaly`].
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -191,15 +191,6 @@ pub fn read_recent(alias: &str, limit: usize) -> io::Result<Vec<Snapshot>> {
     read_recent_in(&data_dir(), alias, limit)
 }
 
-fn status_tag(s: HealthStatus) -> &'static str {
-    match s {
-        HealthStatus::Ok => "OK",
-        HealthStatus::Warn => "WARN",
-        HealthStatus::Crit => "CRIT",
-        HealthStatus::Unknown => "UNKN",
-    }
-}
-
 /// Drop the `health-` prefix for compact column headers.
 fn short_id(id: &str) -> &str {
     id.strip_prefix("health-").unwrap_or(id)
@@ -256,7 +247,7 @@ pub fn text(alias: &str, snaps: &[Snapshot]) -> String {
     }
     out.push('\n');
     for s in snaps {
-        let _ = write!(out, "  {:<20} {:<5}", fmt_utc(s.ts), status_tag(s.overall));
+        let _ = write!(out, "  {:<20} {:<5}", fmt_utc(s.ts), s.overall.tag());
         for id in &ids {
             match s.metrics.get(*id) {
                 Some(v) => {

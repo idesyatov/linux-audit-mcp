@@ -2,13 +2,12 @@
 //!
 //! Debian/Ubuntu only. On non-apt hosts the command errors and the audit
 //! records this as an `Error` finding (not a pass/fail). Broader per-distro
-//! coverage (dnf) comes with the Stage 8 fixtures.
+//! coverage (dnf) is not implemented yet.
 
 use super::parse::{parse_unit_files, service_enabled};
-use super::{Check, Domain, Outcome, Severity};
+use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
 
 const APT_SIM_CMD: &str = "apt-get -s upgrade";
-const UNITS_CMD: &str = "systemctl list-unit-files --type=service --no-pager";
 
 /// Pending security updates (simulated apt upgrade lists `Inst` from -security).
 pub struct SecurityUpdatesPending;

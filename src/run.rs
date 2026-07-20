@@ -85,8 +85,8 @@ pub async fn health_targets(
 }
 
 /// Fill in `report.anomalies` for each successful outcome by comparing the fresh
-/// reading against this host's stored history (Stage B2). Must run BEFORE the
-/// new snapshot is recorded, so the current run is not part of its own baseline.
+/// reading against this host's stored history. Must run BEFORE the new snapshot
+/// is recorded, so the current run is not part of its own baseline.
 ///
 /// Best-effort: a history-read error, an unresolvable alias, or a warming-up
 /// baseline leaves `anomalies` empty (with a note) and never fails the run.
@@ -132,15 +132,6 @@ async fn collect_ordered<T: Send + 'static>(mut set: JoinSet<(usize, T)>) -> Vec
     buf.into_iter().map(|(_, t)| t).collect()
 }
 
-fn status_tag(s: HealthStatus) -> &'static str {
-    match s {
-        HealthStatus::Ok => "OK",
-        HealthStatus::Warn => "WARN",
-        HealthStatus::Crit => "CRIT",
-        HealthStatus::Unknown => "UNKN",
-    }
-}
-
 // ---- group rendering (text + JSON) --------------------------------------
 
 /// Human-readable group health report: a summary line, then each host's block.
@@ -167,7 +158,7 @@ pub fn health_group_text(group: &str, outcomes: &[HealthOutcome]) -> String {
     for o in outcomes {
         match &o.result {
             Ok(r) => {
-                let _ = writeln!(out, "=== {} [{}] ===", o.alias, status_tag(r.overall));
+                let _ = writeln!(out, "=== {} [{}] ===", o.alias, r.overall.tag());
                 out.push_str(&health::report::text(&o.alias, r));
             }
             Err(e) => {

@@ -13,9 +13,11 @@
 //!
 //! Keep the remote vocabulary tiny: prefer dumb readers (`cat <fixed file>`,
 //! `sysctl -a`, `ss -tuln`) and do all parsing in Rust. Fewer commands means a
-//! smaller, auditable surface. Commands requiring root are intentionally absent.
+//! smaller, auditable surface. The only root-requiring readers are the explicit
+//! `sudo -n ...` entries, sent solely to targets opted in with `privileged`.
 //!
-//! Wired into the SSH transport ([`crate::ssh`]); checks arrive in Stage 3.
+//! Wired into the SSH transport ([`crate::ssh`]) and consumed by the audit
+//! checks ([`crate::checks`]).
 #![allow(dead_code)]
 
 use std::error::Error;
@@ -35,7 +37,7 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // `-s` (simulate) performs no actions and needs no root - read-only.
     "apt-get -s upgrade",
     "uname -a",
-    // Operational health probes (Stage A): all unprivileged, read-only snapshots.
+    // Operational health probes: all unprivileged, read-only snapshots.
     "uptime",
     "nproc",
     "free -b",
@@ -44,7 +46,7 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "ss -s",
     // Network interface counters; sampled twice to derive throughput.
     "cat /proc/net/dev",
-    // CPU/IO pressure (Stage B3): `1 2` = one 1-second sample; the last row is
+    // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",
     // Privileged read-only checks (run only on targets opted in with

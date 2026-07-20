@@ -6,8 +6,6 @@
 //! itself. Every command is validated against the read-only catalog before it
 //! is sent (the remote sshd runs it through the login shell, so the catalog's
 //! charset rules matter there too).
-//!
-//! Wired into an MCP tool in Stage 3.
 #![allow(dead_code)]
 
 use std::error::Error;

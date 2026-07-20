@@ -143,14 +143,17 @@ pub enum NftInput {
     NoInputHook,
     /// Input-hook chain(s) exist but none deny by default (all accept).
     AcceptAll,
-    /// An input-hook chain denies by default: `policy drop`, or the chain body
-    /// carries a `drop`/`reject` verdict (ufw/firewalld's catch-all).
+    /// An input-hook chain denies: `policy drop`, or its body carries a
+    /// `drop`/`reject` verdict. Heuristic - a *targeted* deny rule counts too, so
+    /// an accept-policy chain that drops only some traffic is leniently treated as
+    /// denying (we would rather not false-fail a real firewall than be strict).
     DefaultDeny,
 }
 
 /// Classify the input-hook posture of `nft list ruleset` output. Brace depth is
 /// tracked so a rule is attributed to the chain that contains it; a chain counts
-/// as denying if its header is `policy drop` or its body has a `drop`/`reject`.
+/// as denying if its header is `policy drop` or its body has any `drop`/`reject`
+/// verdict (catch-all or targeted - see [`NftInput::DefaultDeny`]).
 pub fn nft_input_policy(output: &str) -> NftInput {
     if output.trim().is_empty() {
         return NftInput::NoRuleset;

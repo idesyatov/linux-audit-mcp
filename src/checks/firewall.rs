@@ -6,9 +6,8 @@
 //! denied by default, not just that a firewall service is running.
 
 use super::parse::{nft_input_policy, parse_unit_files, service_enabled, NftInput};
-use super::{Check, Domain, Outcome, Severity};
+use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
 
-const UNITS_CMD: &str = "systemctl list-unit-files --type=service --no-pager";
 const NFT_CMD: &str = "sudo -n nft list ruleset";
 
 /// No recognised host firewall service is enabled.
@@ -81,9 +80,9 @@ impl Check for NftDefaultDeny {
     }
     fn evaluate(&self, output: &str) -> Outcome {
         match nft_input_policy(output) {
-            NftInput::DefaultDeny => Outcome::pass(
-                "Input hook denies by default (policy drop or a catch-all deny rule).",
-            ),
+            NftInput::DefaultDeny => {
+                Outcome::pass("Input hook denies (policy drop, or a drop/reject rule is present).")
+            }
             NftInput::AcceptAll => Outcome::fail(
                 "Input hook accepts by default with no deny rule (inbound traffic is open).",
             ),

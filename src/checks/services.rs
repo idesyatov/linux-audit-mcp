@@ -1,10 +1,9 @@
 //! Services-domain checks: listening ports (`ss -tuln`) and risky units.
 
 use super::parse::{parse_listen_ports, parse_unit_files, service_enabled};
-use super::{Check, Domain, Outcome, Severity};
+use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
 
 const SS_CMD: &str = "ss -tuln";
-const UNITS_CMD: &str = "systemctl list-unit-files --type=service --no-pager";
 
 /// Cleartext / legacy services listening: (port, name).
 const CLEARTEXT_PORTS: &[(u16, &str)] = &[

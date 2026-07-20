@@ -1,13 +1,15 @@
-//! Stage 8 evals: run every check and the scoring engine against captured
-//! command output stored under `tests/fixtures/<distro>/`, asserting the
-//! expected per-check status and per-profile score.
+//! Evals: run every check and the scoring engine against captured command output
+//! stored under `tests/fixtures/<distro>/`, asserting the expected per-check
+//! status and per-profile score.
 //!
 //! Guards against regressions in parsing, check logic and scoring on realistic,
 //! per-distribution output - without a host. A fixture directory holds one
 //! `<command-slug>.txt` per command a check issues (see [`command_slug`]) and an
-//! `expected.json`. A command whose file is *absent* is treated as unavailable
-//! on that distro (an `Error` finding) - e.g. `apt-get` on a non-Debian host.
-//! The runner discovers every fixture, so adding a distro needs no code change.
+//! `expected.json`. A command whose file is *absent* is treated as unavailable:
+//! an `Error` finding, or `Skipped` for a privileged check that the scenario
+//! isn't opted in to (e.g. `apt-get` on a non-Debian host; `sudo` readers on a
+//! non-privileged host). The runner discovers every fixture, so adding a distro
+//! needs no code change.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

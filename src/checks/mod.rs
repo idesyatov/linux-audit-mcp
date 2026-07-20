@@ -1,6 +1,6 @@
 //! Audit checks: a check declares the read-only command it needs and a pure
 //! `evaluate(output) -> Outcome`. Separating I/O from logic keeps every check
-//! unit-testable against fixtures without a host (and feeds later-stage evals).
+//! unit-testable against fixtures without a host (and by the evals).
 
 pub mod accounts;
 pub mod firewall;
@@ -12,6 +12,10 @@ pub mod ssh;
 pub mod updates;
 
 use serde::Serialize;
+
+/// The `systemctl list-unit-files` listing shared by the firewall, services,
+/// logging and updates checks (each reads it via [`parse::parse_unit_files`]).
+pub(crate) const UNITS_CMD: &str = "systemctl list-unit-files --type=service --no-pager";
 
 // Ordering follows declaration order: Info < Low < Medium < High < Critical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -28,8 +32,6 @@ pub enum Severity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-// The full domain set is defined up front; checks are added domain by domain.
-#[allow(dead_code)]
 pub enum Domain {
     Ssh,
     Accounts,

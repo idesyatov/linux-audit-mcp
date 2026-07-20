@@ -9,15 +9,6 @@ use serde::Serialize;
 
 use super::{HealthReport, HealthStatus};
 
-fn status_tag(s: HealthStatus) -> &'static str {
-    match s {
-        HealthStatus::Ok => "OK",
-        HealthStatus::Warn => "WARN",
-        HealthStatus::Crit => "CRIT",
-        HealthStatus::Unknown => "UNKN",
-    }
-}
-
 #[derive(Serialize)]
 struct Envelope<'a> {
     target: &'a str,
@@ -42,13 +33,13 @@ pub fn text(target: &str, report: &HealthReport) -> String {
         let _ = writeln!(
             out,
             "Health of '{target}': {} (operational, not a security score)",
-            status_tag(report.overall)
+            report.overall.tag()
         );
     } else {
         let _ = writeln!(
             out,
             "Health of '{target}': {} — {} (operational, not a security score)",
-            status_tag(report.overall),
+            report.overall.tag(),
             reasons.join("; ")
         );
     }
@@ -57,7 +48,7 @@ pub fn text(target: &str, report: &HealthReport) -> String {
         let _ = writeln!(
             out,
             "  [{:<4}] {:<20} {} ({})",
-            status_tag(m.status),
+            m.status.tag(),
             m.id,
             m.value,
             m.detail

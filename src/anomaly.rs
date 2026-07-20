@@ -1,4 +1,4 @@
-//! Per-host anomaly detection over stored health history (Stage B2).
+//! Per-host anomaly detection over stored health history.
 //!
 //! A real anomaly is a deviation from *this host's own* recent norm, not a
 //! crossing of a global threshold. We build a **robust** baseline for each
@@ -28,6 +28,11 @@ const EPS: f64 = 1e-9;
 /// Consistency constant making `1.4826 * MAD` a stddev-equivalent scale for
 /// normally distributed data (so the threshold `k` reads like a z-score).
 const MAD_TO_SIGMA: f64 = 1.4826;
+
+/// Finite stand-in for a mathematically infinite z-score (flat baseline, MAD ≈ 0).
+/// Kept large so it always clears `k`, but finite so it serializes as a real
+/// number - JSON has no representation for infinity (it would become `null`).
+const Z_SATURATED: f64 = 1_000.0;
 
 /// Per-target anomaly-detection settings. Every field has a sensible default; a
 /// target may override any subset via `[targets.x.anomaly]` (inherited from a
@@ -130,7 +135,7 @@ pub fn detect(report: &HealthReport, history: &[Snapshot], cfg: &AnomalyConfig) 
         let z = if scaled_mad > EPS {
             dev / scaled_mad
         } else if dev > EPS {
-            f64::INFINITY // flat history: let the materiality gate decide
+            Z_SATURATED // flat history: infinite z; the materiality gate decides
         } else {
             0.0
         };

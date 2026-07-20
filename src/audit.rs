@@ -10,8 +10,8 @@ use crate::ssh::{SshConfig, SshError};
 pub type Outputs = HashMap<&'static str, Result<String, String>>;
 
 /// Build findings by evaluating every check against pre-collected command
-/// outputs. Pure (no I/O): shared by [`run_audit`] and later-stage evals. An
-/// `Err` output becomes an `Error` finding for every check that needs it.
+/// outputs. Pure (no I/O): shared by [`run_audit`] and the evals. An `Err`
+/// output becomes an `Error` finding for every check that needs it.
 ///
 /// `privileged` mirrors the target's opt-in: when set, a check's
 /// [`effective_command`](crate::checks::Check::effective_command) output (e.g.
@@ -102,11 +102,10 @@ async fn snap(ssh: &SshConfig, outputs: &mut Outputs, cmd: &'static str) -> Resu
         Ok(out) => {
             outputs.insert(cmd, Ok(out.stdout));
         }
-        Err(SshError::RemoteCommand { code, stderr }) => {
-            outputs.insert(
-                cmd,
-                Err(format!("remote command failed (code {code:?}): {stderr}")),
-            );
+        // A command that connected but failed becomes an Error finding; reuse the
+        // error's own Display so the message never drifts from `SshError`.
+        Err(e @ SshError::RemoteCommand { .. }) => {
+            outputs.insert(cmd, Err(e.to_string()));
         }
         Err(host_level) => return Err(host_level),
     }
