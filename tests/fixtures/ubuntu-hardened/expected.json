@@ -6,6 +6,7 @@
     "ssh-permit-empty-passwords": "pass",
     "ssh-x11-forwarding": "pass",
     "ssh-max-auth-tries": "pass",
+    "ssh-login-grace-time": "pass",
     "ssh-weak-crypto": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "pass",

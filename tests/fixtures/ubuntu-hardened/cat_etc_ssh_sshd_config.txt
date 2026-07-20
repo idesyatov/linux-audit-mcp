@@ -3,3 +3,4 @@ PasswordAuthentication no
 PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 4
+LoginGraceTime 30

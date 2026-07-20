@@ -7,6 +7,7 @@
     "ssh-permit-empty-passwords": "pass",
     "ssh-x11-forwarding": "pass",
     "ssh-max-auth-tries": "fail",
+    "ssh-login-grace-time": "fail",
     "ssh-weak-crypto": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
@@ -29,7 +30,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 53,
-    "hardened": 40
+    "baseline": 52,
+    "hardened": 39
   }
 }

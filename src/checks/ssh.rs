@@ -211,6 +211,57 @@ impl Check for MaxAuthTries {
     }
 }
 
+/// `LoginGraceTime` leaves the auth window open too long (or unlimited).
+pub struct LoginGraceTime;
+
+impl LoginGraceTime {
+    /// Parse an OpenSSH time value to seconds: a bare integer, or a `m`/`s`
+    /// suffix (`2m` = 120). `0` means no limit. Returns `None` if unparseable.
+    fn seconds(value: &str) -> Option<u64> {
+        let v = value.trim();
+        let (num, mult) = match v.strip_suffix('m') {
+            Some(n) => (n, 60),
+            None => (v.strip_suffix('s').unwrap_or(v), 1),
+        };
+        num.trim().parse::<u64>().ok().map(|n| n * mult)
+    }
+}
+
+impl Check for LoginGraceTime {
+    fn id(&self) -> &'static str {
+        "ssh-login-grace-time"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "SSH LoginGraceTime too long"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Shorten the pre-auth window to limit slow brute-force/DoS: LoginGraceTime 30 \
+         (1-60s; never 0, which is unlimited)."
+    }
+    fn command(&self) -> &'static str {
+        SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // OpenSSH default is 120 seconds.
+        let v = directive(output, "logingracetime", "120");
+        match Self::seconds(&v) {
+            Some(0) => Outcome::fail("LoginGraceTime is 0 (unlimited pre-auth window)."),
+            Some(n) if n <= 60 => Outcome::pass(format!("LoginGraceTime is {n}s.")),
+            Some(n) => Outcome::fail(format!("LoginGraceTime is {n}s (recommended 60s or less).")),
+            None => Outcome::fail(format!("LoginGraceTime is not a time value: {v:?}.")),
+        }
+    }
+}
+
 /// Substrings marking a weak SSH algorithm across ciphers, MACs and key
 /// exchange. Case-insensitive; matched against each comma-separated token of
 /// `Ciphers`, `MACs` and `KexAlgorithms`. Because cipher/MAC/kex names don't
@@ -373,6 +424,29 @@ mod tests {
         assert_eq!(MaxAuthTries.evaluate(OPEN).status, Status::Fail);
         // Default is 6 (> 4).
         assert_eq!(MaxAuthTries.evaluate(DEFAULTS).status, Status::Fail);
+    }
+
+    #[test]
+    fn login_grace_time() {
+        // HARDENED/OPEN don't set it -> default 120 -> fail.
+        assert_eq!(LoginGraceTime.evaluate(DEFAULTS).status, Status::Fail);
+        assert_eq!(
+            LoginGraceTime.evaluate("LoginGraceTime 30\n").status,
+            Status::Pass
+        );
+        // 0 is unlimited -> fail; a minute suffix is parsed (2m = 120 > 60).
+        assert_eq!(
+            LoginGraceTime.evaluate("LoginGraceTime 0\n").status,
+            Status::Fail
+        );
+        assert_eq!(
+            LoginGraceTime.evaluate("LoginGraceTime 2m\n").status,
+            Status::Fail
+        );
+        assert_eq!(
+            LoginGraceTime.evaluate("LoginGraceTime 1m\n").status,
+            Status::Pass
+        );
     }
 
     #[test]

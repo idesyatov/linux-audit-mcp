@@ -517,7 +517,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-25 checks; each reads one read-only command and applies the tool/OpenSSH default
+26 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -530,6 +530,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | ssh       | `ssh-permit-empty-passwords`   | High     | `PermitEmptyPasswords yes`                 |
 | ssh       | `ssh-x11-forwarding`           | Low      | `X11Forwarding yes`                        |
 | ssh       | `ssh-max-auth-tries`           | Low      | `MaxAuthTries` > 4                         |
+| ssh       | `ssh-login-grace-time`         | Low      | `LoginGraceTime` > 60s or 0 (unlimited)    |
 | ssh       | `ssh-weak-crypto`              | Medium   | weak `Ciphers`/`MACs`/`KexAlgorithms` set (effective set on 🔑 privileged targets) |
 | accounts  | `accounts-nonroot-uid0`        | Critical | a non-`root` account has UID 0             |
 | accounts  | `accounts-pass-max-days`       | Low      | `PASS_MAX_DAYS` > 365 or unset             |

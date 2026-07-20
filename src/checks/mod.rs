@@ -123,6 +123,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(ssh::PermitEmptyPasswords),
         Box::new(ssh::X11Forwarding),
         Box::new(ssh::MaxAuthTries),
+        Box::new(ssh::LoginGraceTime),
         Box::new(ssh::WeakCrypto),
         // accounts
         Box::new(accounts::NonRootUid0),
