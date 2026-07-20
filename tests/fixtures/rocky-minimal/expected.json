@@ -1,12 +1,13 @@
 {
-  "description": "Rocky/RHEL host: root login and password auth on, X11 forwarding on, no password expiry, ip_forward enabled, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors).",
+  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, ip_forward enabled, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config.",
+  "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
     "ssh-password-authentication": "fail",
     "ssh-permit-empty-passwords": "pass",
     "ssh-x11-forwarding": "fail",
     "ssh-max-auth-tries": "pass",
-    "ssh-weak-crypto": "fail",
+    "ssh-weak-crypto": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
     "accounts-umask": "pass",
@@ -27,7 +28,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 34,
-    "hardened": 11
+    "baseline": 37,
+    "hardened": 15
   }
 }

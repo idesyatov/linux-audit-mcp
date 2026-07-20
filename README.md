@@ -530,7 +530,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | ssh       | `ssh-permit-empty-passwords`   | High     | `PermitEmptyPasswords yes`                 |
 | ssh       | `ssh-x11-forwarding`           | Low      | `X11Forwarding yes`                        |
 | ssh       | `ssh-max-auth-tries`           | Low      | `MaxAuthTries` > 4                         |
-| ssh       | `ssh-weak-crypto`              | Medium   | weak `Ciphers`/`MACs`/`KexAlgorithms` set  |
+| ssh       | `ssh-weak-crypto`              | Medium   | weak `Ciphers`/`MACs`/`KexAlgorithms` set (effective set on 🔑 privileged targets) |
 | accounts  | `accounts-nonroot-uid0`        | Critical | a non-`root` account has UID 0             |
 | accounts  | `accounts-pass-max-days`       | Low      | `PASS_MAX_DAYS` > 365 or unset             |
 | accounts  | `accounts-umask`               | Low      | default `UMASK` allows group/other access  |
@@ -564,16 +564,22 @@ host = "203.0.113.10"
 privileged = true          # enable sudo-based checks for this host
 ```
 
-They run as `sudo -n <read-only command>` — **`-n` never prompts**, so a host that
-hasn't granted sudo simply reports the check as `skipped` (never a hang, never a
-failure). Nothing else changes: the commands are still exact members of the
+They run as `sudo -n <read-only command>` — **`-n` never prompts**. A host that
+isn't opted in never receives the command and the check is `skipped` (never a
+hang). Nothing else changes: the commands are still exact members of the
 read-only catalog, and the model still only ever picks a target *alias*.
+
+Opting in also **upgrades the SSH domain**: every ssh-domain check reads the
+*effective* config from `sudo -n sshd -T` (compiled defaults **and** `Match`
+blocks resolved) instead of parsing `/etc/ssh/sshd_config`, so `ssh-weak-crypto`
+and friends become authoritative. If that command isn't granted, the ssh checks
+fall back to the file — the audit never breaks.
 
 Grant the auditor **passwordless sudo for exactly these commands** — never `ALL`.
 On the target (`visudo -f /etc/sudoers.d/linux-audit`):
 
 ```
-auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow
+auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/sbin/sshd -T
 ```
 
 Skipped checks are excluded from the score (like `error`); the report shows them

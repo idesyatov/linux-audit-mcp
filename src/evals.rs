@@ -29,6 +29,11 @@ struct Expected {
     findings: HashMap<String, String>,
     /// profile name -> expected total score.
     scores: HashMap<String, u8>,
+    /// Whether the target is opted in to privileged checks. When true, a check's
+    /// effective-command fixture (e.g. `sudo_n_sshd_T.txt`) supersedes its normal
+    /// command - mirroring the real `privileged = true` run path. Default false.
+    #[serde(default)]
+    privileged: bool,
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -88,7 +93,27 @@ fn run_scenario(scenario: &Path, name: &str) {
         }
     }
 
-    let findings = audit::evaluate(&outputs);
+    // On an opted-in scenario, load each check's effective-command fixture (e.g.
+    // `sshd -T`) so it supersedes the base command. An absent file models a
+    // missing sudo grant: the check falls back to its normal command.
+    if expected.privileged {
+        for check in all_checks() {
+            let Some(cmd) = check.effective_command() else {
+                continue;
+            };
+            if outputs.contains_key(cmd) {
+                continue;
+            }
+            let file = scenario.join(command_slug(cmd));
+            if file.exists() {
+                let text = std::fs::read_to_string(&file)
+                    .unwrap_or_else(|e| panic!("[{name}] read {}: {e}", file.display()));
+                outputs.insert(cmd, Ok(text));
+            }
+        }
+    }
+
+    let findings = audit::evaluate(&outputs, expected.privileged);
 
     // The fixture must pin exactly the checks the audit produces.
     assert_eq!(
@@ -235,12 +260,20 @@ fn fixtures_match_expected_health() {
 
 #[test]
 fn command_slugs_are_unique() {
-    let mut slugs: Vec<String> = all_checks()
+    // Every command a check may issue - base and effective (privileged) - must
+    // map to a distinct fixture slug, so fixtures can never collide.
+    let commands = |checks: Vec<Box<dyn crate::checks::Check>>| {
+        checks
+            .iter()
+            .flat_map(|c| std::iter::once(c.command()).chain(c.effective_command()))
+            .collect::<Vec<&str>>()
+    };
+    let mut slugs: Vec<String> = commands(all_checks())
         .iter()
-        .map(|c| command_slug(c.command()))
+        .map(|c| command_slug(c))
         .collect();
     let distinct_commands = {
-        let mut cmds: Vec<&str> = all_checks().iter().map(|c| c.command()).collect();
+        let mut cmds = commands(all_checks());
         cmds.sort_unstable();
         cmds.dedup();
         cmds.len()

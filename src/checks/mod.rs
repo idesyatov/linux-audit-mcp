@@ -103,6 +103,15 @@ pub trait Check: Send + Sync {
     fn privileged(&self) -> bool {
         false
     }
+    /// An optional privileged command whose output *supersedes* [`command`] when
+    /// the target is opted in (`privileged = true`) and the command succeeded -
+    /// e.g. `sudo -n sshd -T` yields the effective SSH config. When the target
+    /// isn't opted in, or the command failed (no sudo grant), the check falls
+    /// back to its normal [`command`], so the audit never breaks. Must be in the
+    /// catalog. `None` = the check has no privileged upgrade.
+    fn effective_command(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Every check the auditor runs.
@@ -158,6 +167,13 @@ mod registry_tests {
                 check.id(),
                 check.command()
             );
+            if let Some(cmd) = check.effective_command() {
+                assert!(
+                    catalog::validate(cmd).is_ok(),
+                    "check {} uses a non-catalog effective command: {cmd:?}",
+                    check.id(),
+                );
+            }
         }
     }
 

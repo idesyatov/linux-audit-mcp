@@ -51,6 +51,10 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // `privileged = true`; the operator grants NOPASSWD sudo for exactly these).
     // `sudo -n` never prompts - it fails fast if not permitted.
     "sudo -n cat /etc/shadow",
+    // Effective SSH config: `sshd -T` dumps the *resolved* directives (compiled
+    // defaults + Match blocks). On an opted-in target its output supersedes the
+    // file read for every ssh-domain check, making them authoritative.
+    "sudo -n sshd -T",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)

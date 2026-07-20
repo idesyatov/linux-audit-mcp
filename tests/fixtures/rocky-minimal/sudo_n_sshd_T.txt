@@ -1,0 +1,8 @@
+permitrootlogin yes
+passwordauthentication yes
+permitemptypasswords no
+x11forwarding yes
+maxauthtries 3
+ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
+macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+kexalgorithms curve25519-sha256,ecdh-sha2-nistp256

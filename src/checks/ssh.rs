@@ -2,12 +2,20 @@
 //!
 //! Each check applies the OpenSSH built-in default when a directive is absent,
 //! so a stock config is judged the way sshd would actually behave. Match blocks
-//! are not considered (see [`super::parse::parse_sshd_config`]).
+//! are not considered when reading the file (see [`super::parse::parse_sshd_config`]).
+//!
+//! On a target opted in with `privileged = true`, every check upgrades to the
+//! *effective* config from `sudo -n sshd -T` (compiled defaults + Match blocks
+//! resolved), which supersedes the file read - see
+//! [`Check::effective_command`](super::Check::effective_command). The same
+//! keyword parser handles both, since `sshd -T` emits `key value` lines.
 
 use super::parse::parse_sshd_config;
 use super::{Check, Domain, Outcome, Severity};
 
 const SSHD_CMD: &str = "cat /etc/ssh/sshd_config";
+/// Effective config on privileged targets; supersedes [`SSHD_CMD`].
+const SSHD_EFFECTIVE_CMD: &str = "sudo -n sshd -T";
 
 /// Value of `key` from sshd_config, falling back to sshd's built-in `default`.
 /// Returned lowercased for case-insensitive comparison.
@@ -40,6 +48,9 @@ impl Check for PermitRootLogin {
     }
     fn command(&self) -> &'static str {
         SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
     }
     fn evaluate(&self, output: &str) -> Outcome {
         // OpenSSH default is prohibit-password; we require an explicit `no`.
@@ -76,6 +87,9 @@ impl Check for PasswordAuthentication {
     fn command(&self) -> &'static str {
         SSHD_CMD
     }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
     fn evaluate(&self, output: &str) -> Outcome {
         // OpenSSH default is yes.
         let v = directive(output, "passwordauthentication", "yes");
@@ -111,6 +125,9 @@ impl Check for PermitEmptyPasswords {
     fn command(&self) -> &'static str {
         SSHD_CMD
     }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
     fn evaluate(&self, output: &str) -> Outcome {
         // OpenSSH default is no.
         let v = directive(output, "permitemptypasswords", "no");
@@ -144,6 +161,9 @@ impl Check for X11Forwarding {
     fn command(&self) -> &'static str {
         SSHD_CMD
     }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
     fn evaluate(&self, output: &str) -> Outcome {
         // OpenSSH default is no.
         let v = directive(output, "x11forwarding", "no");
@@ -176,6 +196,9 @@ impl Check for MaxAuthTries {
     }
     fn command(&self) -> &'static str {
         SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
     }
     fn evaluate(&self, output: &str) -> Outcome {
         // OpenSSH default is 6.
@@ -213,10 +236,11 @@ const WEAK_ALGO_MARKERS: &[&str] = &[
     "rsa1024",
 ];
 
-/// Weak SSH ciphers/MACs/key-exchange algorithms are configured. Unprivileged:
-/// only what's *explicitly* set in sshd_config is judged - the effective set
-/// (compiled defaults + `Match` blocks) needs `sshd -T` and root, so an absent
-/// directive is reported as a pass with that caveat.
+/// Weak SSH ciphers/MACs/key-exchange algorithms are configured. On an
+/// unprivileged target only what's *explicitly* set in sshd_config is judged, so
+/// an absent directive passes (the effective set - compiled defaults + `Match`
+/// blocks - isn't visible without root). On a `privileged` target the check reads
+/// `sshd -T`, so the effective algorithm list is judged directly.
 pub struct WeakCrypto;
 
 impl WeakCrypto {
@@ -263,12 +287,13 @@ impl Check for WeakCrypto {
     fn command(&self) -> &'static str {
         SSHD_CMD
     }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
     fn evaluate(&self, output: &str) -> Outcome {
         let weak = Self::weak_tokens(output);
         if weak.is_empty() {
-            Outcome::pass(
-                "No weak SSH algorithms explicitly configured (effective set needs sshd -T).",
-            )
+            Outcome::pass("No weak SSH algorithms configured.")
         } else {
             Outcome::fail(format!(
                 "Weak SSH algorithms configured: {}.",
