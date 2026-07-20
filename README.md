@@ -257,6 +257,8 @@ net_rx_warn_mibps = 0.0   # per-interface throughput (MiB/s); 0 disables (inform
 net_rx_crit_mibps = 0.0
 net_tx_warn_mibps = 0.0
 net_tx_crit_mibps = 0.0
+net_err_warn_pps = 1.0    # per-interface error rate (pkts/s); errors on a healthy NIC are ~0
+net_err_crit_pps = 10.0
 net_sample_secs = 1       # gap between the two /proc/net/dev samples
 top_n = 5                 # hot processes listed per resource
 ```
@@ -609,6 +611,11 @@ reported `UNKNOWN` and never gates.
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
+| `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
+
+The text report's headline is a **diagnosis**: the overall status followed by a
+compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0 err
+5.0/s; disk: 92% on /`), so a sick host stands out at a glance.
 
 Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Two metrics need a timed
 sample: `vmstat 1 2` takes a one-second CPU sample for I/O-wait, and network

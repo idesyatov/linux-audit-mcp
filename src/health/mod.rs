@@ -146,6 +146,11 @@ pub struct Thresholds {
     pub net_rx_crit_mibps: f64,
     pub net_tx_warn_mibps: f64,
     pub net_tx_crit_mibps: f64,
+    /// Interface error+drop rate (packets/s) over the sample window. Errors/drops
+    /// on a healthy NIC are ~0, so a low bound is meaningful; a bad link/driver
+    /// or saturated queue shows a sustained nonzero rate.
+    pub net_err_warn_pps: f64,
+    pub net_err_crit_pps: f64,
     /// Gap between the two `/proc/net/dev` samples, in seconds.
     pub net_sample_secs: u64,
     /// How many hot processes to list per resource.
@@ -169,6 +174,8 @@ impl Default for Thresholds {
             net_rx_crit_mibps: 0.0,
             net_tx_warn_mibps: 0.0,
             net_tx_crit_mibps: 0.0,
+            net_err_warn_pps: 1.0,
+            net_err_crit_pps: 10.0,
             net_sample_secs: 1,
             top_n: 5,
         }
@@ -439,6 +446,78 @@ fn net_throughput_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> 
     }
 }
 
+/// Per-interface RX/TX error and drop rate from two `/proc/net/dev` samples
+/// `dt_secs` apart. A healthy link produces ~0 errors, so a sustained nonzero
+/// rate flags a bad NIC/driver or a saturated queue. Status is driven by the
+/// *error* rate (drops can be benign under load, so they are shown as context
+/// only). Informational - never touches the score - but it feeds `overall` and,
+/// via `numeric`, the history/anomaly baseline (a rate spike vs this host's norm
+/// is flagged by the anomaly layer).
+fn net_errors_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-net-errors";
+    const TITLE: &str = "Network errors";
+    if dt_secs <= 0.0 {
+        return unknown(ID, TITLE, "no measurable interval between samples");
+    }
+    let (before, after) = (parse::parse_net_dev(s1), parse::parse_net_dev(s2));
+    if after.is_empty() {
+        return unknown(ID, TITLE, "no interfaces reported");
+    }
+    // name, err/s, drop/s, cumulative errs, cumulative drops (since boot).
+    let mut ifaces: Vec<(String, f64, f64, u64, u64)> = after
+        .iter()
+        .filter_map(|(name, now)| {
+            let prev = before.get(name)?;
+            // saturating: a counter reset (reboot/wrap) yields 0 rather than a spike.
+            let rate = |a: u64, b: u64| a.saturating_sub(b) as f64 / dt_secs;
+            let err_ps = rate(now.rx_errs, prev.rx_errs) + rate(now.tx_errs, prev.tx_errs);
+            let drop_ps = rate(now.rx_drop, prev.rx_drop) + rate(now.tx_drop, prev.tx_drop);
+            Some((
+                name.clone(),
+                err_ps,
+                drop_ps,
+                now.rx_errs + now.tx_errs,
+                now.rx_drop + now.tx_drop,
+            ))
+        })
+        .collect();
+    if ifaces.is_empty() {
+        return unknown(ID, TITLE, "no interfaces seen in both samples");
+    }
+    // Worst error rate leads (drops break ties).
+    ifaces.sort_by(|a, b| {
+        (b.1, b.2)
+            .partial_cmp(&(a.1, a.2))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let worst_err = ifaces.iter().map(|i| i.1).fold(0.0, f64::max);
+    let status = threshold_status(worst_err, thr.net_err_warn_pps, thr.net_err_crit_pps);
+
+    let (name, err_ps, drop_ps, _, _) = &ifaces[0];
+    let cum_err: u64 = ifaces.iter().map(|i| i.3).sum();
+    let cum_drop: u64 = ifaces.iter().map(|i| i.4).sum();
+    let detail = ifaces
+        .iter()
+        .map(|(n, e, d, ce, cd)| {
+            format!("{n} err {e:.1}/s drop {d:.1}/s (since boot: err {ce}, drop {cd})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: if worst_err > 0.0 {
+            format!("{name} err {err_ps:.1}/s (drop {drop_ps:.1}/s)")
+        } else {
+            format!("no interface errors (since boot: err {cum_err}, drop {cum_drop})")
+        },
+        detail: format!("per-interface over {dt_secs:.1}s: {detail}"),
+        // Total error rate across interfaces - one scalar for history/baselining.
+        numeric: Some(ifaces.iter().map(|i| i.1).sum()),
+    }
+}
+
 /// Worst status across metrics (`Unknown` is neutral; `Unknown` overall only if
 /// nothing could be measured).
 fn worst(metrics: &[Metric]) -> HealthStatus {
@@ -507,17 +586,29 @@ pub async fn collect(ssh: &SshConfig, thr: &Thresholds) -> Result<HealthReport, 
 
     let mut report = evaluate(&outputs, thr);
 
-    // Two timed samples of the interface counters -> throughput. A remote error
-    // on either read degrades to an Unknown metric; host-level errors abort.
-    let net = match sample_net(ssh, thr).await? {
-        Some((s1, s2, dt)) => net_throughput_metric(&s1, &s2, dt, thr),
-        None => unknown(
-            "health-net-throughput",
-            "Network throughput",
-            "/proc/net/dev unavailable",
+    // Two timed samples of the interface counters -> throughput and error rate.
+    // A remote error on either read degrades to Unknown metrics; host-level errors
+    // abort.
+    let (throughput, errors) = match sample_net(ssh, thr).await? {
+        Some((s1, s2, dt)) => (
+            net_throughput_metric(&s1, &s2, dt, thr),
+            net_errors_metric(&s1, &s2, dt, thr),
+        ),
+        None => (
+            unknown(
+                "health-net-throughput",
+                "Network throughput",
+                "/proc/net/dev unavailable",
+            ),
+            unknown(
+                "health-net-errors",
+                "Network errors",
+                "/proc/net/dev unavailable",
+            ),
         ),
     };
-    report.metrics.push(net);
+    report.metrics.push(throughput);
+    report.metrics.push(errors);
     report.overall = worst(&report.metrics);
     Ok(report)
 }
@@ -595,6 +686,32 @@ mod tests {
         let thr = Thresholds::default();
         let m = load_metric(&outputs(&[]), &thr);
         assert_eq!(m.status, HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn net_errors_flag_rising_errors_not_drops() {
+        let thr = Thresholds::default();
+        // rx/tx: bytes pkts errs drop fifo frame comp mcast | bytes pkts errs drop ...
+        let s1 = "  eth0: 1000 10 0 0 0 0 0 0 2000 20 0 0 0 0 0 0\n";
+        // +50 rx errors over 1s -> 50/s -> Crit (>= 10).
+        let s2 = "  eth0: 2000 20 50 0 0 0 0 0 3000 30 0 0 0 0 0 0\n";
+        let m = net_errors_metric(s1, s2, 1.0, &thr);
+        assert_eq!(m.status, HealthStatus::Crit);
+        assert_eq!(m.numeric, Some(50.0));
+
+        // No change -> Ok, and the value states there are no errors.
+        let ok = net_errors_metric(s1, s1, 1.0, &thr);
+        assert_eq!(ok.status, HealthStatus::Ok);
+        assert!(ok.value.contains("no interface errors"), "{}", ok.value);
+
+        // Drops alone (no errors) must not raise the status.
+        let dropping = "  eth0: 2000 20 0 99 0 0 0 0 3000 30 0 0 0 0 0 0\n";
+        let d = net_errors_metric(s1, dropping, 1.0, &thr);
+        assert_eq!(d.status, HealthStatus::Ok);
+
+        // A counter reset (second sample lower) yields 0, not a spike.
+        let reset = net_errors_metric(s2, s1, 1.0, &thr);
+        assert_eq!(reset.status, HealthStatus::Ok);
     }
 
     #[test]

@@ -30,11 +30,28 @@ pub fn text(target: &str, report: &HealthReport) -> String {
     use std::fmt::Write;
 
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Health of '{target}': {} (operational, not a security score)",
-        status_tag(report.overall)
-    );
+    // Headline as a diagnosis: the overall status plus a compact reason for each
+    // metric that isn't OK, so a sick host is obvious at a glance.
+    let reasons: Vec<String> = report
+        .metrics
+        .iter()
+        .filter(|m| matches!(m.status, HealthStatus::Warn | HealthStatus::Crit))
+        .map(|m| format!("{}: {}", m.id.trim_start_matches("health-"), m.value))
+        .collect();
+    if reasons.is_empty() {
+        let _ = writeln!(
+            out,
+            "Health of '{target}': {} (operational, not a security score)",
+            status_tag(report.overall)
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "Health of '{target}': {} — {} (operational, not a security score)",
+            status_tag(report.overall),
+            reasons.join("; ")
+        );
+    }
 
     for m in &report.metrics {
         let _ = writeln!(
@@ -112,6 +129,18 @@ mod tests {
         assert!(out.contains("not a security score"));
         assert!(out.contains("top CPU:"));
         assert!(out.contains("mysqld"));
+    }
+
+    #[test]
+    fn headline_names_unhealthy_metrics() {
+        // The sample is WARN (load + disk); the headline should name them inline.
+        let out = text("web", &sample());
+        let first = out.lines().next().unwrap();
+        assert!(first.contains("WARN —"), "{first}");
+        assert!(
+            first.contains("disk:") || first.contains("load:"),
+            "{first}"
+        );
     }
 
     #[test]

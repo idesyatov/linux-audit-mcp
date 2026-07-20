@@ -147,12 +147,19 @@ pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetCounters {
     pub rx_bytes: u64,
+    pub rx_packets: u64,
+    pub rx_errs: u64,
+    pub rx_drop: u64,
     pub tx_bytes: u64,
+    pub tx_packets: u64,
+    pub tx_errs: u64,
+    pub tx_drop: u64,
 }
 
 /// Parse `cat /proc/net/dev` into `iface -> counters`. The two header lines and
 /// the loopback interface are skipped. Columns after the `iface:` are receive
-/// (`bytes` at index 0) then transmit (`bytes` at index 8).
+/// (`bytes` 0, `packets` 1, `errs` 2, `drop` 3, ...) then transmit (`bytes` 8,
+/// `packets` 9, `errs` 10, `drop` 11, ...).
 pub fn parse_net_dev(output: &str) -> std::collections::HashMap<String, NetCounters> {
     let mut map = std::collections::HashMap::new();
     for line in output.lines() {
@@ -167,15 +174,21 @@ pub fn parse_net_dev(output: &str) -> std::collections::HashMap<String, NetCount
             .split_whitespace()
             .filter_map(|s| s.parse().ok())
             .collect();
-        // Need at least receive bytes (0) and transmit bytes (8).
-        if nums.len() < 9 {
+        // Need through the transmit drop column (index 11).
+        if nums.len() < 12 {
             continue;
         }
         map.insert(
             iface.to_string(),
             NetCounters {
                 rx_bytes: nums[0],
+                rx_packets: nums[1],
+                rx_errs: nums[2],
+                rx_drop: nums[3],
                 tx_bytes: nums[8],
+                tx_packets: nums[9],
+                tx_errs: nums[10],
+                tx_drop: nums[11],
             },
         );
     }
