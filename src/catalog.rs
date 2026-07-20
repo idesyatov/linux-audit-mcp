@@ -55,6 +55,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // defaults + Match blocks). On an opted-in target its output supersedes the
     // file read for every ssh-domain check, making them authoritative.
     "sudo -n sshd -T",
+    // Live nftables ruleset: the effective inbound firewall posture (ufw,
+    // firewalld and raw nft all render here). Root-only; read-only dump.
+    "sudo -n nft list ruleset",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)

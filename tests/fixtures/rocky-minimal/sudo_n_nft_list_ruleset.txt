@@ -1,0 +1,13 @@
+table inet firewalld {
+	chain filter_INPUT {
+		type filter hook input priority filter + 10; policy accept;
+		ct state established,related accept
+		iifname "lo" accept
+		ct state new,untracked accept
+		reject with icmpx admin-prohibited
+	}
+	chain filter_FORWARD {
+		type filter hook forward priority filter + 10; policy accept;
+		reject with icmpx admin-prohibited
+	}
+}

@@ -138,6 +138,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(kernel::AcceptSourceRoute),
         // firewall
         Box::new(firewall::FirewallEnabled),
+        Box::new(firewall::NftDefaultDeny), // privileged (sudo)
         // updates
         Box::new(updates::SecurityUpdatesPending),
         Box::new(updates::AutoUpdatesEnabled),

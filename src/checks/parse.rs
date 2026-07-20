@@ -134,6 +134,79 @@ pub fn parse_listen_ports(output: &str) -> Vec<u16> {
         .collect()
 }
 
+/// The input-filtering posture of an `nft list ruleset` dump.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NftInput {
+    /// No ruleset at all (empty output) - the kernel firewall is empty.
+    NoRuleset,
+    /// A ruleset exists but no base chain is hooked to `input`.
+    NoInputHook,
+    /// Input-hook chain(s) exist but none deny by default (all accept).
+    AcceptAll,
+    /// An input-hook chain denies by default: `policy drop`, or the chain body
+    /// carries a `drop`/`reject` verdict (ufw/firewalld's catch-all).
+    DefaultDeny,
+}
+
+/// Classify the input-hook posture of `nft list ruleset` output. Brace depth is
+/// tracked so a rule is attributed to the chain that contains it; a chain counts
+/// as denying if its header is `policy drop` or its body has a `drop`/`reject`.
+pub fn nft_input_policy(output: &str) -> NftInput {
+    if output.trim().is_empty() {
+        return NftInput::NoRuleset;
+    }
+    let mut depth: i32 = 0;
+    // Current chain: (brace depth at its start, is_input, denies).
+    let mut chain: Option<(i32, bool, bool)> = None;
+    let mut any_input = false;
+    let mut deny_found = false;
+
+    for line in output.lines() {
+        let tokens: Vec<String> = line
+            .split_whitespace()
+            .map(|t| {
+                t.trim_matches(|c| c == ';' || c == ',')
+                    .to_ascii_lowercase()
+            })
+            .collect();
+
+        // Enter a chain (base or regular) at `chain <name> {`.
+        if chain.is_none() && tokens.first().map(String::as_str) == Some("chain") {
+            chain = Some((depth, false, false));
+        }
+        if let Some((_, is_input, denies)) = chain.as_mut() {
+            if line.contains("hook input") {
+                *is_input = true;
+            }
+            if tokens.iter().any(|t| t == "drop" || t == "reject") {
+                *denies = true;
+            }
+        }
+
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+
+        // Close the chain once depth falls back to its start level.
+        if let Some((start, is_input, denies)) = chain {
+            if depth <= start {
+                if is_input {
+                    any_input = true;
+                    deny_found |= denies;
+                }
+                chain = None;
+            }
+        }
+    }
+
+    if deny_found {
+        NftInput::DefaultDeny
+    } else if any_input {
+        NftInput::AcceptAll
+    } else {
+        NftInput::NoInputHook
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +275,63 @@ mod tests {
         let mut ports = parse_listen_ports(out);
         ports.sort_unstable();
         assert_eq!(ports, vec![22, 23, 53]);
+    }
+
+    #[test]
+    fn nft_empty_is_no_ruleset() {
+        assert_eq!(nft_input_policy(""), NftInput::NoRuleset);
+        assert_eq!(nft_input_policy("  \n"), NftInput::NoRuleset);
+    }
+
+    #[test]
+    fn nft_policy_drop_is_default_deny() {
+        // ufw / hand-rolled nft: the input base chain drops by default.
+        let out = "table inet filter {\n\
+                   \tchain input {\n\
+                   \t\ttype filter hook input priority filter; policy drop;\n\
+                   \t\tct state established,related accept\n\
+                   \t}\n\
+                   \tchain output {\n\
+                   \t\ttype filter hook output priority filter; policy accept;\n\
+                   \t}\n\
+                   }\n";
+        assert_eq!(nft_input_policy(out), NftInput::DefaultDeny);
+    }
+
+    #[test]
+    fn nft_accept_policy_with_reject_rule_is_default_deny() {
+        // firewalld pattern: policy accept, but a catch-all reject at the end.
+        let out = "table inet firewalld {\n\
+                   \tchain filter_INPUT {\n\
+                   \t\ttype filter hook input priority filter + 10; policy accept;\n\
+                   \t\tct state established,related accept\n\
+                   \t\treject with icmpx admin-prohibited\n\
+                   \t}\n\
+                   }\n";
+        assert_eq!(nft_input_policy(out), NftInput::DefaultDeny);
+    }
+
+    #[test]
+    fn nft_accept_policy_no_deny_is_accept_all() {
+        let out = "table inet filter {\n\
+                   \tchain input {\n\
+                   \t\ttype filter hook input priority filter; policy accept;\n\
+                   \t\tct state established,related accept\n\
+                   \t}\n\
+                   }\n";
+        assert_eq!(nft_input_policy(out), NftInput::AcceptAll);
+    }
+
+    #[test]
+    fn nft_no_input_hook() {
+        // A ruleset that only filters output/forward - nothing guards input. A
+        // drop in the output chain must not be mistaken for input filtering.
+        let out = "table inet filter {\n\
+                   \tchain output {\n\
+                   \t\ttype filter hook output priority filter; policy accept;\n\
+                   \t\tdrop\n\
+                   \t}\n\
+                   }\n";
+        assert_eq!(nft_input_policy(out), NftInput::NoInputHook);
     }
 }

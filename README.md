@@ -517,7 +517,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-24 checks; each reads one read-only command and applies the tool/OpenSSH default
+25 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -542,6 +542,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | kernel    | `kernel-accept-redirects`      | Low      | `accept_redirects` = 1                     |
 | kernel    | `kernel-source-route`          | Low      | `accept_source_route` = 1                  |
 | firewall  | `firewall-enabled`             | High     | no firewalld/ufw/nftables enabled          |
+| firewall  | `firewall-nft-default-deny` 🔑 | Medium   | live `nft` input hook accepts everything (defers if the host uses the iptables-legacy backend) |
 | updates   | `updates-security-pending`     | Medium   | pending security updates (apt)             |
 | updates   | `updates-auto-updates`         | Low      | no automatic security-update service on    |
 | services  | `services-cleartext-ports`     | Medium   | telnet/ftp/r-services listening            |
@@ -579,7 +580,7 @@ Grant the auditor **passwordless sudo for exactly these commands** — never `AL
 On the target (`visudo -f /etc/sudoers.d/linux-audit`):
 
 ```
-auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/sbin/sshd -T
+auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset
 ```
 
 Skipped checks are excluded from the score (like `error`); the report shows them

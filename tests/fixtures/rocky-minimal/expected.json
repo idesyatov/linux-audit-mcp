@@ -19,6 +19,7 @@
     "kernel-accept-redirects": "pass",
     "kernel-source-route": "pass",
     "firewall-enabled": "pass",
+    "firewall-nft-default-deny": "pass",
     "updates-security-pending": "error",
     "updates-auto-updates": "pass",
     "services-cleartext-ports": "fail",
