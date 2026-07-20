@@ -9,6 +9,10 @@
 //! (target aliases) and may carry shared vars that its members inherit. Per
 //! field, precedence is host value -> group value -> built-in default; a host
 //! inheriting the same field from two groups with different values is an error.
+//! The nested `[..health]` / `[..anomaly]` tables inherit as a *whole table*,
+//! not field-by-field: a host that sets any `health` value overrides the group's
+//! entire `health` table (it cannot take one threshold from the group and one of
+//! its own).
 //!
 //! Path: `$LINUX_AUDIT_CONFIG`, else `~/.config/linux-audit-mcp/targets.toml`.
 

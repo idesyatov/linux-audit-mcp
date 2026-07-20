@@ -82,8 +82,11 @@ sysctl_check!(
 );
 
 /// `true` if the sysctl output shows a Docker/container bridge (`docker0` or a
-/// user-defined `br-*` network), which appears as `net.*.conf.<iface>.*` keys.
-/// Such a host forwards packets by design, so `ip_forward=1` is expected there.
+/// `br-*` bridge), which appears as `net.*.conf.<iface>.*` keys. Such a host
+/// forwards packets by design, so `ip_forward=1` is expected there. Note the
+/// `br-*` match is broad: any host with a `br-`prefixed bridge (not only Docker
+/// networks) is treated as a router here - deliberately lenient to avoid
+/// false-flagging container/VM hosts.
 fn is_container_host(sysctl: &HashMap<String, String>) -> bool {
     sysctl
         .keys()

@@ -101,7 +101,7 @@ pub struct DomainScore {
     pub domain: Domain,
     pub weight: f64,
     pub score: u8,
-    /// Evaluable (non-errored) checks in the domain.
+    /// Evaluated checks in the domain (pass + fail; excludes errored and skipped).
     pub checks: usize,
     pub failed: usize,
     pub errored: usize,

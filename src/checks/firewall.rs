@@ -1,7 +1,7 @@
 //! Firewall-domain checks.
 //!
-//! [`FirewallEnabled`] is a non-root, file-state view: a host firewall is enabled
-//! at boot. [`NftDefaultDeny`] is the privileged upgrade - it reads the live
+//! [`FirewallEnabled`] is a non-root, unit-enablement view: which firewall
+//! service is enabled at boot. [`NftDefaultDeny`] is the privileged upgrade - it reads the live
 //! ruleset (`sudo -n nft list ruleset`) to confirm inbound traffic is actually
 //! denied by default, not just that a firewall service is running.
 

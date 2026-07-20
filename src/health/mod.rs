@@ -391,6 +391,17 @@ fn bound_status(value: f64, warn: f64, crit: f64) -> HealthStatus {
     }
 }
 
+/// Interfaces present in both `/proc/net/dev` samples, paired as
+/// `(name, before, after)`. Shared by the throughput and error metrics, which
+/// derive different per-second rates from the same counter deltas.
+fn net_deltas(s1: &str, s2: &str) -> Vec<(String, parse::NetCounters, parse::NetCounters)> {
+    let (before, after) = (parse::parse_net_dev(s1), parse::parse_net_dev(s2));
+    after
+        .into_iter()
+        .filter_map(|(name, now)| before.get(&name).map(|&prev| (name, prev, now)))
+        .collect()
+}
+
 /// Per-interface RX/TX throughput from two `/proc/net/dev` samples `dt_secs`
 /// apart. Pure: `collect` does the timing and sampling. Informational unless
 /// the per-direction MiB/s thresholds are set.
@@ -400,16 +411,16 @@ fn net_throughput_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> 
     if dt_secs <= 0.0 {
         return unknown(ID, TITLE, "no measurable interval between samples");
     }
-    let (before, after) = (parse::parse_net_dev(s1), parse::parse_net_dev(s2));
-    if after.is_empty() {
-        return unknown(ID, TITLE, "no interfaces reported");
+    let deltas = net_deltas(s1, s2);
+    if deltas.is_empty() {
+        return unknown(ID, TITLE, "no interfaces seen in both samples");
     }
     const MIB: f64 = 1024.0 * 1024.0;
-    // name, rx MiB/s, tx MiB/s - only interfaces seen in both samples and not idle.
-    let mut ifaces: Vec<(String, f64, f64)> = after
+    // Idle interfaces are dropped (0 throughput isn't interesting); the error
+    // metric keeps them, since a quiet link can still err.
+    let mut ifaces: Vec<(String, f64, f64)> = deltas
         .iter()
-        .filter_map(|(name, now)| {
-            let prev = before.get(name)?;
+        .filter_map(|(name, prev, now)| {
             // saturating: a counter reset (reboot/wrap) yields 0 rather than a spike.
             let rx = now.rx_bytes.saturating_sub(prev.rx_bytes) as f64 / dt_secs / MIB;
             let tx = now.tx_bytes.saturating_sub(prev.tx_bytes) as f64 / dt_secs / MIB;
@@ -471,38 +482,35 @@ fn net_errors_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metr
     if dt_secs <= 0.0 {
         return unknown(ID, TITLE, "no measurable interval between samples");
     }
-    let (before, after) = (parse::parse_net_dev(s1), parse::parse_net_dev(s2));
-    if after.is_empty() {
-        return unknown(ID, TITLE, "no interfaces reported");
+    let deltas = net_deltas(s1, s2);
+    if deltas.is_empty() {
+        return unknown(ID, TITLE, "no interfaces seen in both samples");
     }
-    // name, err/s, drop/s, cumulative errs, cumulative drops (since boot).
-    let mut ifaces: Vec<(String, f64, f64, u64, u64)> = after
+    // name, err/s, drop/s, cumulative errs, cumulative drops (since boot). Unlike
+    // throughput, idle interfaces are kept: a quiet link can still show errors.
+    let mut ifaces: Vec<(String, f64, f64, u64, u64)> = deltas
         .iter()
-        .filter_map(|(name, now)| {
-            let prev = before.get(name)?;
+        .map(|(name, prev, now)| {
             // saturating: a counter reset (reboot/wrap) yields 0 rather than a spike.
             let rate = |a: u64, b: u64| a.saturating_sub(b) as f64 / dt_secs;
             let err_ps = rate(now.rx_errs, prev.rx_errs) + rate(now.tx_errs, prev.tx_errs);
             let drop_ps = rate(now.rx_drop, prev.rx_drop) + rate(now.tx_drop, prev.tx_drop);
-            Some((
+            (
                 name.clone(),
                 err_ps,
                 drop_ps,
                 now.rx_errs + now.tx_errs,
                 now.rx_drop + now.tx_drop,
-            ))
+            )
         })
         .collect();
-    if ifaces.is_empty() {
-        return unknown(ID, TITLE, "no interfaces seen in both samples");
-    }
     // Worst error rate leads (drops break ties).
     ifaces.sort_by(|a, b| {
         (b.1, b.2)
             .partial_cmp(&(a.1, a.2))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let worst_err = ifaces.iter().map(|i| i.1).fold(0.0, f64::max);
+    let worst_err = ifaces[0].1; // sorted err-desc, so the first is the max
     let status = threshold_status(worst_err, thr.net_err_warn_pps, thr.net_err_crit_pps);
 
     let (name, err_ps, drop_ps, _, _) = &ifaces[0];

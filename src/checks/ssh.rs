@@ -1,8 +1,11 @@
 //! SSH-domain checks (parsing `/etc/ssh/sshd_config`).
 //!
-//! Each check applies the OpenSSH built-in default when a directive is absent,
-//! so a stock config is judged the way sshd would actually behave. Match blocks
-//! are not considered when reading the file (see [`super::parse::parse_sshd_config`]).
+//! Most checks apply the OpenSSH built-in default when a directive is absent, so
+//! a stock config is judged the way sshd would actually behave. (The exception is
+//! `ssh-weak-crypto`: on an unprivileged target it judges only algorithms that
+//! are *explicitly* listed, since the effective algorithm set needs `sshd -T`.)
+//! Match blocks are not considered when reading the file (see
+//! [`super::parse::parse_sshd_config`]).
 //!
 //! On a target opted in with `privileged = true`, every check upgrades to the
 //! *effective* config from `sudo -n sshd -T` (compiled defaults + Match blocks
