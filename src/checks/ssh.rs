@@ -265,6 +265,87 @@ impl Check for LoginGraceTime {
     }
 }
 
+/// Idle SSH sessions are never disconnected (`ClientAliveInterval` is 0/unset,
+/// or set implausibly high).
+pub struct ClientAliveInterval;
+
+impl Check for ClientAliveInterval {
+    fn id(&self) -> &'static str {
+        "ssh-client-alive-interval"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "SSH idle sessions not timed out"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Disconnect idle sessions: ClientAliveInterval 300 (1-900s; 0 disables it) \
+         with ClientAliveCountMax 3."
+    }
+    fn command(&self) -> &'static str {
+        SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // OpenSSH default is 0: no keepalive, so idle sessions live forever.
+        let v = directive(output, "clientaliveinterval", "0");
+        match v.parse::<u32>() {
+            Ok(0) => {
+                Outcome::fail("ClientAliveInterval is 0 (idle sessions are never disconnected).")
+            }
+            Ok(n) if n <= 900 => Outcome::pass(format!("ClientAliveInterval is {n}s.")),
+            Ok(n) => Outcome::fail(format!(
+                "ClientAliveInterval is {n}s (recommended 900s or less)."
+            )),
+            Err(_) => Outcome::fail(format!("ClientAliveInterval is not a number: {v:?}.")),
+        }
+    }
+}
+
+/// SSH device/VPN tunnelling is enabled (`PermitTunnel` is not `no`).
+pub struct PermitTunnel;
+
+impl Check for PermitTunnel {
+    fn id(&self) -> &'static str {
+        "ssh-permit-tunnel"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "SSH tunnelling permitted"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Disable tun-device forwarding unless this host is a VPN gateway: PermitTunnel no."
+    }
+    fn command(&self) -> &'static str {
+        SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // OpenSSH default is no.
+        let v = directive(output, "permittunnel", "no");
+        if v == "no" {
+            Outcome::pass("PermitTunnel is no.")
+        } else {
+            Outcome::fail(format!(
+                "PermitTunnel is '{v}' (SSH can build a network tunnel)."
+            ))
+        }
+    }
+}
+
 /// Substrings marking a weak SSH algorithm across ciphers, MACs and key
 /// exchange. Case-insensitive; matched against each comma-separated token of
 /// `Ciphers`, `MACs` and `KexAlgorithms`. Because cipher/MAC/kex names don't
@@ -449,6 +530,51 @@ mod tests {
         assert_eq!(
             LoginGraceTime.evaluate("LoginGraceTime 1m\n").status,
             Status::Pass
+        );
+    }
+
+    #[test]
+    fn client_alive_interval() {
+        // Default is 0 -> idle sessions never disconnect -> fail.
+        assert_eq!(ClientAliveInterval.evaluate(DEFAULTS).status, Status::Fail);
+        assert_eq!(
+            ClientAliveInterval
+                .evaluate("ClientAliveInterval 300\n")
+                .status,
+            Status::Pass
+        );
+        assert_eq!(
+            ClientAliveInterval
+                .evaluate("ClientAliveInterval 0\n")
+                .status,
+            Status::Fail
+        );
+        // Implausibly high -> fail.
+        assert_eq!(
+            ClientAliveInterval
+                .evaluate("ClientAliveInterval 3600\n")
+                .status,
+            Status::Fail
+        );
+    }
+
+    #[test]
+    fn permit_tunnel() {
+        // Default is no -> pass.
+        assert_eq!(PermitTunnel.evaluate(DEFAULTS).status, Status::Pass);
+        assert_eq!(
+            PermitTunnel.evaluate("PermitTunnel no\n").status,
+            Status::Pass
+        );
+        assert_eq!(
+            PermitTunnel.evaluate("PermitTunnel yes\n").status,
+            Status::Fail
+        );
+        assert_eq!(
+            PermitTunnel
+                .evaluate("PermitTunnel point-to-point\n")
+                .status,
+            Status::Fail
         );
     }
 

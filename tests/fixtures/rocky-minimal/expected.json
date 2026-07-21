@@ -1,5 +1,5 @@
 {
-  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config.",
+  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
   "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
@@ -8,6 +8,8 @@
     "ssh-x11-forwarding": "fail",
     "ssh-max-auth-tries": "pass",
     "ssh-login-grace-time": "fail",
+    "ssh-client-alive-interval": "fail",
+    "ssh-permit-tunnel": "pass",
     "ssh-weak-crypto": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
@@ -36,7 +38,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 28,
-    "hardened": 4
+    "baseline": 27,
+    "hardened": 3
   }
 }

@@ -4,3 +4,5 @@ PermitEmptyPasswords no
 X11Forwarding no
 MaxAuthTries 4
 LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 3

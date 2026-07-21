@@ -7,6 +7,8 @@
     "ssh-x11-forwarding": "pass",
     "ssh-max-auth-tries": "pass",
     "ssh-login-grace-time": "pass",
+    "ssh-client-alive-interval": "pass",
+    "ssh-permit-tunnel": "pass",
     "ssh-weak-crypto": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "pass",

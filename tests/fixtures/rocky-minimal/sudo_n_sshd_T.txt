@@ -6,3 +6,6 @@ maxauthtries 3
 ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
 macs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 kexalgorithms curve25519-sha256,ecdh-sha2-nistp256
+clientaliveinterval 0
+clientalivecountmax 3
+permittunnel no
