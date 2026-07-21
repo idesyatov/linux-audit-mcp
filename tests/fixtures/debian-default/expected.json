@@ -1,5 +1,5 @@
 {
-  "description": "Stock Debian, privileged (opted in) but with no `sshd -T` grant, so the ssh checks fall back to the file. Default root login (prohibit-password), password auth on, MaxAuthTries 6, no password expiry, umask 022, one insecure sysctl, no host firewall, pending security updates, auditd absent.",
+  "description": "Stock Debian, privileged (opted in) but with no `sshd -T` grant, so the ssh checks fall back to the file. Default root login (prohibit-password), password auth on, MaxAuthTries 6, no password expiry, umask 022, several insecure sysctls (accept_redirects, dmesg_restrict, kptr_restrict, unprivileged_bpf), no host firewall, pending security updates, auditd absent.",
   "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
@@ -19,6 +19,11 @@
     "kernel-ip-forward": "pass",
     "kernel-accept-redirects": "fail",
     "kernel-source-route": "pass",
+    "kernel-ptrace-scope": "pass",
+    "kernel-dmesg-restrict": "fail",
+    "kernel-kptr-restrict": "fail",
+    "kernel-suid-dumpable": "pass",
+    "kernel-unprivileged-bpf": "fail",
     "firewall-enabled": "fail",
     "firewall-nft-default-deny": "skipped",
     "updates-security-pending": "fail",
@@ -30,7 +35,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 52,
-    "hardened": 39
+    "baseline": 48,
+    "hardened": 35
   }
 }

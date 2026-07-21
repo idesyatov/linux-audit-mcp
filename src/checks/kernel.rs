@@ -158,6 +158,61 @@ sysctl_check!(
     "source routing can bypass filtering"
 );
 
+sysctl_check!(
+    PtraceScope,
+    "kernel-ptrace-scope",
+    "Yama ptrace scope",
+    Severity::Low,
+    "Restrict ptrace to child processes: kernel.yama.ptrace_scope=1 (requires the Yama LSM).",
+    "kernel.yama.ptrace_scope",
+    &["1", "2", "3"],
+    "unrestricted ptrace lets any process read another's memory"
+);
+
+sysctl_check!(
+    DmesgRestrict,
+    "kernel-dmesg-restrict",
+    "Kernel log restricted (dmesg_restrict)",
+    Severity::Low,
+    "Hide the kernel log from unprivileged users: kernel.dmesg_restrict=1.",
+    "kernel.dmesg_restrict",
+    &["1"],
+    "an open kernel log leaks addresses and secrets"
+);
+
+sysctl_check!(
+    KptrRestrict,
+    "kernel-kptr-restrict",
+    "Kernel pointer restriction (kptr_restrict)",
+    Severity::Low,
+    "Hide kernel pointers from unprivileged users: kernel.kptr_restrict=1.",
+    "kernel.kptr_restrict",
+    &["1", "2"],
+    "exposed kernel pointers ease exploitation"
+);
+
+sysctl_check!(
+    SuidDumpable,
+    "kernel-suid-dumpable",
+    "Setuid core dumps (suid_dumpable)",
+    Severity::Medium,
+    "Disable core dumps of setuid programs: fs.suid_dumpable=0.",
+    "fs.suid_dumpable",
+    &["0"],
+    "setuid core dumps can leak credentials"
+);
+
+sysctl_check!(
+    UnprivilegedBpf,
+    "kernel-unprivileged-bpf",
+    "Unprivileged BPF disabled",
+    Severity::Medium,
+    "Disable unprivileged BPF: kernel.unprivileged_bpf_disabled=1.",
+    "kernel.unprivileged_bpf_disabled",
+    &["1", "2"],
+    "unprivileged BPF is a local privilege-escalation surface"
+);
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -223,6 +278,73 @@ mod tests {
         assert_eq!(
             RpFilter
                 .evaluate("net.ipv4.conf.all.rp_filter = 0\n")
+                .status,
+            Status::Fail
+        );
+    }
+
+    #[test]
+    fn hardening_sysctls() {
+        // ptrace_scope: any of 1/2/3 restricts; 0 (or missing) fails.
+        assert_eq!(
+            PtraceScope
+                .evaluate("kernel.yama.ptrace_scope = 1\n")
+                .status,
+            Status::Pass
+        );
+        assert_eq!(
+            PtraceScope
+                .evaluate("kernel.yama.ptrace_scope = 3\n")
+                .status,
+            Status::Pass
+        );
+        assert_eq!(
+            PtraceScope
+                .evaluate("kernel.yama.ptrace_scope = 0\n")
+                .status,
+            Status::Fail
+        );
+        assert_eq!(PtraceScope.evaluate("").status, Status::Fail);
+
+        assert_eq!(
+            DmesgRestrict.evaluate("kernel.dmesg_restrict = 1\n").status,
+            Status::Pass
+        );
+        assert_eq!(
+            DmesgRestrict.evaluate("kernel.dmesg_restrict = 0\n").status,
+            Status::Fail
+        );
+
+        // kptr_restrict: 1 or 2 both hide pointers.
+        assert_eq!(
+            KptrRestrict.evaluate("kernel.kptr_restrict = 2\n").status,
+            Status::Pass
+        );
+        assert_eq!(
+            KptrRestrict.evaluate("kernel.kptr_restrict = 0\n").status,
+            Status::Fail
+        );
+
+        // suid_dumpable: only 0 is safe (1 and 2 both allow setuid dumps).
+        assert_eq!(
+            SuidDumpable.evaluate("fs.suid_dumpable = 0\n").status,
+            Status::Pass
+        );
+        assert_eq!(
+            SuidDumpable.evaluate("fs.suid_dumpable = 2\n").status,
+            Status::Fail
+        );
+
+        // unprivileged_bpf_disabled: 1 or 2 both disable it.
+        assert_eq!(
+            UnprivilegedBpf
+                .evaluate("kernel.unprivileged_bpf_disabled = 1\n")
+                .status,
+            Status::Pass
+        );
+        assert_eq!(
+            UnprivilegedBpf
+                .evaluate("kernel.unprivileged_bpf_disabled = 0\n")
                 .status,
             Status::Fail
         );

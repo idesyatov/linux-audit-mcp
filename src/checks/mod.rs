@@ -139,6 +139,11 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(kernel::IpForward),
         Box::new(kernel::AcceptRedirects),
         Box::new(kernel::AcceptSourceRoute),
+        Box::new(kernel::PtraceScope),
+        Box::new(kernel::DmesgRestrict),
+        Box::new(kernel::KptrRestrict),
+        Box::new(kernel::SuidDumpable),
+        Box::new(kernel::UnprivilegedBpf),
         // firewall
         Box::new(firewall::FirewallEnabled),
         Box::new(firewall::NftDefaultDeny), // privileged (sudo)
