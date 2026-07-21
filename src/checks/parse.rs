@@ -78,6 +78,49 @@ pub fn shadow_empty_password_accounts(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Traditional DES `crypt`: exactly 13 chars from the crypt base64 alphabet,
+/// or a BSDI extended-DES hash (leading `_`). Both are legacy and weak.
+fn is_des_crypt(hash: &str) -> bool {
+    hash.starts_with('_')
+        || (hash.len() == 13
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'/'))
+}
+
+/// From `/etc/shadow`, the accounts whose password hash uses a weak algorithm,
+/// as `(user, algo)` pairs. Weak = MD5 (`$1$`) or legacy DES `crypt`. Empty
+/// fields are ignored (they're the concern of
+/// [`shadow_empty_password_accounts`]); locked/disabled accounts (`!`, `*`) and
+/// modern hashes (bcrypt `$2*$`, SHA-256 `$5$`, SHA-512 `$6$`, yescrypt `$y$`,
+/// …) are fine and excluded; malformed/short lines are skipped.
+pub fn shadow_weak_hash_accounts(output: &str) -> Vec<(String, &'static str)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() < 2 {
+                return None;
+            }
+            let user = f[0].trim();
+            let hash = f[1];
+            // Empty (no password) and locked/disabled accounts aren't weak hashes.
+            if user.is_empty() || hash.is_empty() || hash.starts_with(['!', '*']) {
+                return None;
+            }
+            if let Some(rest) = hash.strip_prefix('$') {
+                // `$id$salt$hash` - only MD5 (`1`) is weak among the `$id$` schemes.
+                let id = rest.split('$').next().unwrap_or("");
+                (id == "1").then(|| (user.to_string(), "MD5"))
+            } else if is_des_crypt(hash) {
+                Some((user.to_string(), "DES"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Parse `sysctl -a` output (`key = value` lines) into a map.
 pub fn parse_sysctl(output: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -244,6 +287,28 @@ mod tests {
         assert_eq!(empty, vec!["nopass", "also_nopass"]);
         // A normal shadow yields nothing.
         assert!(shadow_empty_password_accounts("root:$6$x:19000::::::\n").is_empty());
+    }
+
+    #[test]
+    fn shadow_weak_hashes() {
+        // `desuser` carries a 13-char traditional DES crypt hash.
+        let out = "root:$6$abc$hash:19000:0:99999:7:::\n\
+                   sha256:$5$abc$hash:19000:0:99999:7:::\n\
+                   bcrypt:$2b$10$abcdefghijklmnopqrstuv:19000:0:99999:7:::\n\
+                   md5user:$1$Xy9z8W7v$0123456789AbCdEfGhIjK.:19000:0:99999:7:::\n\
+                   desuser:abcABC123./xy:19000:0:99999:7:::\n\
+                   locked:!:19000:0:99999:7:::\n\
+                   nopass::19000:0:99999:7:::\n";
+        let weak = shadow_weak_hash_accounts(out);
+        assert_eq!(
+            weak,
+            vec![
+                ("md5user".to_string(), "MD5"),
+                ("desuser".to_string(), "DES"),
+            ]
+        );
+        // Strong hashes, locked and empty accounts are not weak-hash findings.
+        assert!(shadow_weak_hash_accounts("root:$6$x$h:19000::::::\n").is_empty());
     }
 
     #[test]

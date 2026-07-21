@@ -132,6 +132,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(accounts::PassMaxDays),
         Box::new(accounts::DefaultUmask),
         Box::new(accounts::ShadowEmptyPassword), // privileged (sudo)
+        Box::new(accounts::ShadowWeakHash),      // privileged (sudo)
         // kernel
         Box::new(kernel::Aslr),
         Box::new(kernel::TcpSyncookies),

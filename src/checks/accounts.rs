@@ -1,6 +1,8 @@
 //! Accounts-domain checks (`getent passwd`, `/etc/login.defs`).
 
-use super::parse::{parse_keyword_map, parse_passwd, shadow_empty_password_accounts};
+use super::parse::{
+    parse_keyword_map, parse_passwd, shadow_empty_password_accounts, shadow_weak_hash_accounts,
+};
 use super::{Check, Domain, Outcome, Severity};
 
 const PASSWD_CMD: &str = "getent passwd";
@@ -161,6 +163,49 @@ impl Check for ShadowEmptyPassword {
     }
 }
 
+/// An account's `/etc/shadow` hash uses a weak algorithm (MD5 or legacy DES),
+/// which is cheap to crack offline once the file is read. Privileged: `/etc/shadow`
+/// is root-only, read via `sudo`.
+pub struct ShadowWeakHash;
+
+impl Check for ShadowWeakHash {
+    fn id(&self) -> &'static str {
+        "accounts-shadow-weak-hash"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Accounts
+    }
+    fn title(&self) -> &'static str {
+        "Account with a weak password hash"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Re-hash weak passwords with a strong scheme (yescrypt or SHA-512): set \
+         ENCRYPT_METHOD in /etc/login.defs, then have affected users reset their password."
+    }
+    fn command(&self) -> &'static str {
+        SHADOW_CMD
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let weak = shadow_weak_hash_accounts(output);
+        if weak.is_empty() {
+            Outcome::pass("No accounts use a weak password hash.")
+        } else {
+            let list = weak
+                .iter()
+                .map(|(user, algo)| format!("{user} ({algo})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Outcome::fail(format!("Accounts with a weak password hash: {list}."))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -206,5 +251,18 @@ mod tests {
         let out = ShadowEmptyPassword.evaluate(bad);
         assert_eq!(out.status, Status::Fail);
         assert!(out.detail.contains("guest"));
+    }
+
+    #[test]
+    fn shadow_weak_hash() {
+        assert!(ShadowWeakHash.privileged());
+        // All-strong shadow -> pass.
+        let strong = "root:$6$x$hash:19000::::::\nalice:$y$j9T$s$h:19000::::::\n";
+        assert_eq!(ShadowWeakHash.evaluate(strong).status, Status::Pass);
+        // A legacy MD5 hash -> fail, naming the account and algorithm.
+        let weak = "root:$6$x$hash:19000::::::\nlegacy:$1$salt$hash:19000::::::\n";
+        let out = ShadowWeakHash.evaluate(weak);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("legacy (MD5)"));
     }
 }

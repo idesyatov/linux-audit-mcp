@@ -12,6 +12,7 @@
     "accounts-pass-max-days": "pass",
     "accounts-umask": "pass",
     "accounts-shadow-empty-password": "skipped",
+    "accounts-shadow-weak-hash": "skipped",
     "kernel-aslr": "pass",
     "kernel-tcp-syncookies": "pass",
     "kernel-rp-filter": "pass",
