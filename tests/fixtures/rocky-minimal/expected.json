@@ -1,5 +1,5 @@
 {
-  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
+  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, a system account with a login shell (svc, uid 150), ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
   "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
@@ -14,6 +14,8 @@
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
     "accounts-umask": "pass",
+    "accounts-duplicate-uid": "pass",
+    "accounts-system-login-shells": "fail",
     "accounts-shadow-empty-password": "fail",
     "accounts-shadow-weak-hash": "fail",
     "kernel-aslr": "pass",
@@ -39,6 +41,6 @@
   },
   "scores": {
     "baseline": 27,
-    "hardened": 3
+    "hardened": 2
   }
 }

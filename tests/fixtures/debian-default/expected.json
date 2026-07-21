@@ -1,5 +1,5 @@
 {
-  "description": "Stock Debian, privileged (opted in) but with no `sshd -T` grant, so the ssh checks fall back to the file. Default root login (prohibit-password), password auth on, MaxAuthTries 6, idle sessions not timed out (ClientAliveInterval unset), no password expiry, umask 022, several insecure sysctls (accept_redirects, dmesg_restrict, kptr_restrict, unprivileged_bpf), no host firewall, pending security updates, auditd absent.",
+  "description": "Stock Debian, privileged (opted in) but with no `sshd -T` grant, so the ssh checks fall back to the file. Default root login (prohibit-password), password auth on, MaxAuthTries 6, idle sessions not timed out (ClientAliveInterval unset), no password expiry, umask 022, a duplicate UID (admin shares 1000 with debian), several insecure sysctls (accept_redirects, dmesg_restrict, kptr_restrict, unprivileged_bpf), no host firewall, pending security updates, auditd absent.",
   "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
@@ -14,6 +14,8 @@
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "fail",
     "accounts-umask": "fail",
+    "accounts-duplicate-uid": "fail",
+    "accounts-system-login-shells": "pass",
     "accounts-shadow-empty-password": "pass",
     "accounts-shadow-weak-hash": "pass",
     "kernel-aslr": "pass",
@@ -38,7 +40,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 47,
-    "hardened": 33
+    "baseline": 45,
+    "hardened": 30
   }
 }

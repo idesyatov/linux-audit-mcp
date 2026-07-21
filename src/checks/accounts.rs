@@ -1,5 +1,7 @@
 //! Accounts-domain checks (`getent passwd`, `/etc/login.defs`).
 
+use std::collections::BTreeMap;
+
 use super::parse::{
     parse_keyword_map, parse_passwd, shadow_empty_password_accounts, shadow_weak_hash_accounts,
 };
@@ -163,6 +165,105 @@ impl Check for ShadowEmptyPassword {
     }
 }
 
+/// Two or more accounts share a UID - they are the same identity to the kernel,
+/// so file ownership and audit trails can't distinguish them (a classic way to
+/// hide a second privileged-equivalent account).
+pub struct DuplicateUid;
+
+impl Check for DuplicateUid {
+    fn id(&self) -> &'static str {
+        "accounts-duplicate-uid"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Accounts
+    }
+    fn title(&self) -> &'static str {
+        "Accounts sharing a UID"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Give every account a unique UID; investigate any shared UID as a possible hidden account."
+    }
+    fn command(&self) -> &'static str {
+        PASSWD_CMD
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // Group account names by UID (BTreeMap -> deterministic, UID-sorted output).
+        let mut by_uid: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        for e in parse_passwd(output) {
+            by_uid.entry(e.uid).or_default().push(e.name);
+        }
+        let dups: Vec<String> = by_uid
+            .iter()
+            .filter(|(_, names)| names.len() > 1)
+            .map(|(uid, names)| format!("{uid} ({})", names.join(", ")))
+            .collect();
+        if dups.is_empty() {
+            Outcome::pass("Every account has a unique UID.")
+        } else {
+            Outcome::fail(format!(
+                "UIDs shared by multiple accounts: {}.",
+                dups.join("; ")
+            ))
+        }
+    }
+}
+
+/// `true` if `shell` is a real interactive login shell (i.e. not a nologin/false
+/// stub). Empty, `nologin`, `false`, `sync` and `/dev/null` are non-login.
+fn is_login_shell(shell: &str) -> bool {
+    let s = shell.trim();
+    if s.is_empty() || s.contains("nologin") || s == "/dev/null" {
+        return false;
+    }
+    !matches!(s.rsplit('/').next().unwrap_or(s), "false" | "sync")
+}
+
+/// A system account (UID below 1000, other than root) has a real login shell,
+/// when service accounts should be non-login (nologin/false) to shrink the
+/// attack surface. 1000 is the conventional `UID_MIN` for human users.
+pub struct SystemLoginShells;
+
+const SYSTEM_UID_MAX: u32 = 999;
+
+impl Check for SystemLoginShells {
+    fn id(&self) -> &'static str {
+        "accounts-system-login-shells"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Accounts
+    }
+    fn title(&self) -> &'static str {
+        "System account with a login shell"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Give service accounts a non-login shell: usermod -s /usr/sbin/nologin <user>."
+    }
+    fn command(&self) -> &'static str {
+        PASSWD_CMD
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let bad: Vec<String> = parse_passwd(output)
+            .into_iter()
+            .filter(|e| e.uid != 0 && e.uid <= SYSTEM_UID_MAX && is_login_shell(&e.shell))
+            .map(|e| format!("{} (uid {}, {})", e.name, e.uid, e.shell))
+            .collect();
+        if bad.is_empty() {
+            Outcome::pass("No system account has a login shell.")
+        } else {
+            Outcome::fail(format!(
+                "System accounts with a login shell: {}.",
+                bad.join(", ")
+            ))
+        }
+    }
+}
+
 /// An account's `/etc/shadow` hash uses a weak algorithm (MD5 or legacy DES),
 /// which is cheap to crack offline once the file is read. Privileged: `/etc/shadow`
 /// is root-only, read via `sudo`.
@@ -251,6 +352,35 @@ mod tests {
         let out = ShadowEmptyPassword.evaluate(bad);
         assert_eq!(out.status, Status::Fail);
         assert!(out.detail.contains("guest"));
+    }
+
+    #[test]
+    fn duplicate_uid() {
+        let clean = "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n";
+        assert_eq!(DuplicateUid.evaluate(clean).status, Status::Pass);
+        // Two names share UID 1000.
+        let dup = "root:x:0:0::/root:/bin/bash\n\
+                   alice:x:1000:1000::/home/alice:/bin/bash\n\
+                   backup:x:1000:1000::/home/backup:/bin/bash\n";
+        let out = DuplicateUid.evaluate(dup);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("1000") && out.detail.contains("backup"));
+    }
+
+    #[test]
+    fn system_login_shells() {
+        // root (uid 0) is allowed a shell; service accounts use nologin.
+        let clean = "root:x:0:0::/root:/bin/bash\n\
+                     daemon:x:1:1::/usr/sbin:/usr/sbin/nologin\n\
+                     sync:x:5:0::/sbin:/bin/sync\n\
+                     user:x:1000:1000::/home/user:/bin/bash\n";
+        assert_eq!(SystemLoginShells.evaluate(clean).status, Status::Pass);
+        // A system account (uid < 1000) with a real shell -> fail.
+        let bad = "root:x:0:0::/root:/bin/bash\n\
+                   svc:x:150:150::/var/lib/svc:/bin/bash\n";
+        let out = SystemLoginShells.evaluate(bad);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("svc"));
     }
 
     #[test]

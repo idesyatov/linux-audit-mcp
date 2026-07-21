@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 34 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 36 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -519,7 +519,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-34 checks; each reads one read-only command and applies the tool/OpenSSH default
+36 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -539,6 +539,8 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | accounts  | `accounts-nonroot-uid0`        | Critical | a non-`root` account has UID 0             |
 | accounts  | `accounts-pass-max-days`       | Low      | `PASS_MAX_DAYS` > 365 or unset             |
 | accounts  | `accounts-umask`               | Low      | default `UMASK` allows group/other access  |
+| accounts  | `accounts-duplicate-uid`       | Medium   | two or more accounts share a UID           |
+| accounts  | `accounts-system-login-shells` | Low      | a system account (UID < 1000) has a login shell |
 | accounts  | `accounts-shadow-empty-password` 🔑 | Critical | an account has an empty `/etc/shadow` password |
 | accounts  | `accounts-shadow-weak-hash` 🔑 | Medium   | an account's password hash is MD5 or legacy DES |
 | kernel    | `kernel-aslr`                  | Medium   | `randomize_va_space` ≠ 2                    |

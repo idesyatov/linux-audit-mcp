@@ -13,6 +13,8 @@
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "pass",
     "accounts-umask": "pass",
+    "accounts-duplicate-uid": "pass",
+    "accounts-system-login-shells": "pass",
     "accounts-shadow-empty-password": "skipped",
     "accounts-shadow-weak-hash": "skipped",
     "kernel-aslr": "pass",
