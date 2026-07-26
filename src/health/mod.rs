@@ -31,13 +31,28 @@ const VMSTAT: &str = "vmstat 1 2";
 /// Failed systemd services - a zero-config "something is broken" signal.
 const SYSTEMCTL_FAILED: &str =
     "systemctl list-units --type=service --state=failed --no-legend --no-pager";
+/// Container state via docker and podman (either may be absent). `-a` lists all
+/// states so a crash-looping container caught mid-backoff is still seen.
+const DOCKER_PS: &str = "docker ps -a";
+const PODMAN_PS: &str = "podman ps -a";
 /// Sampled twice (not single-shot) to derive throughput and error rate, so it is
 /// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
 /// [`evaluate`].
 const NETDEV: &str = "cat /proc/net/dev";
 
 /// Commands snapped exactly once per snapshot.
-const SINGLE_SHOT: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, VMSTAT, SYSTEMCTL_FAILED];
+const SINGLE_SHOT: &[&str] = &[
+    UPTIME,
+    NPROC,
+    FREE,
+    DF,
+    PS,
+    SS,
+    VMSTAT,
+    SYSTEMCTL_FAILED,
+    DOCKER_PS,
+    PODMAN_PS,
+];
 
 /// Every read-only command the health snapshot may issue (each must be in the
 /// catalog; see the invariant test). Consumed only by the invariant test and
@@ -52,6 +67,8 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     SS,
     VMSTAT,
     SYSTEMCTL_FAILED,
+    DOCKER_PS,
+    PODMAN_PS,
     NETDEV,
 ];
 
@@ -436,6 +453,54 @@ fn failed_units_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
     }
 }
 
+/// Container liveness across docker and podman: a zero-config signal that a
+/// containerised service is broken. A `Restarting` container (crash loop) is
+/// `Crit`; an `unhealthy` one (failing healthcheck) is `Warn`. Neither runtime
+/// present (or reachable) reports `Unknown`, so hosts without containers - or
+/// where the audit user can't run the CLI - never gate. `numeric` is the count of
+/// broken containers, for history/anomaly baselining.
+fn containers_metric(outputs: &Outputs) -> Metric {
+    const ID: &str = "health-containers";
+    const TITLE: &str = "Container health";
+    let (docker, podman) = (out(outputs, DOCKER_PS), out(outputs, PODMAN_PS));
+    if docker.is_none() && podman.is_none() {
+        return unknown(ID, TITLE, "no docker/podman available");
+    }
+    let mut problems: Vec<(String, &'static str)> = Vec::new();
+    for text in [docker, podman].into_iter().flatten() {
+        problems.extend(parse::parse_container_problems(text));
+    }
+    let restarting = problems.iter().filter(|(_, s)| *s == "restarting").count();
+    let unhealthy = problems.len() - restarting;
+    let status = if restarting > 0 {
+        HealthStatus::Crit
+    } else if unhealthy > 0 {
+        HealthStatus::Warn
+    } else {
+        HealthStatus::Ok
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: if problems.is_empty() {
+            "all containers healthy".to_string()
+        } else {
+            format!("{restarting} restarting, {unhealthy} unhealthy")
+        },
+        detail: if problems.is_empty() {
+            "no containers restarting or unhealthy".to_string()
+        } else {
+            problems
+                .iter()
+                .map(|(n, s)| format!("{n} ({s})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+        numeric: Some(problems.len() as f64),
+    }
+}
+
 /// Ok/Warn/Crit for one throughput bound; a threshold of `0` disables it.
 fn bound_status(value: f64, warn: f64, crit: f64) -> HealthStatus {
     if crit > 0.0 && value >= crit {
@@ -614,6 +679,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
     metrics.push(failed_units_metric(outputs, thr));
+    metrics.push(containers_metric(outputs));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
     let top_cpu: Vec<ProcInfo> = procs.iter().take(thr.top_n).cloned().collect();
@@ -851,6 +917,34 @@ mod tests {
             failed_units_metric(&outputs(&[]), &thr).status,
             HealthStatus::Unknown
         );
+    }
+
+    #[test]
+    fn containers_status() {
+        let hdr = "CONTAINER ID IMAGE COMMAND CREATED STATUS PORTS NAMES\n";
+        // No runtime at all -> Unknown (never gates).
+        assert_eq!(
+            containers_metric(&outputs(&[])).status,
+            HealthStatus::Unknown
+        );
+        // Docker present, everything Up -> Ok.
+        let healthy = format!("{hdr}a img x x Up 2 days 80/tcp web\n");
+        assert_eq!(
+            containers_metric(&outputs(&[("docker ps -a", &healthy)])).status,
+            HealthStatus::Ok
+        );
+        // An unhealthy container -> Warn.
+        let unhealthy = format!("{hdr}b img x x Up 3 days (unhealthy) 5432/tcp db\n");
+        assert_eq!(
+            containers_metric(&outputs(&[("docker ps -a", &unhealthy)])).status,
+            HealthStatus::Warn
+        );
+        // A restarting (crash-looping) container -> Crit, named in detail. Podman
+        // path also works.
+        let looping = format!("{hdr}c img x x Restarting (2) 5 seconds ago 443/tcp mtproxy\n");
+        let m = containers_metric(&outputs(&[("podman ps -a", &looping)]));
+        assert_eq!(m.status, HealthStatus::Crit);
+        assert!(m.detail.contains("mtproxy"));
     }
 
     #[test]

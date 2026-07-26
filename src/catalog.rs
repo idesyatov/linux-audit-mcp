@@ -52,6 +52,12 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // Failed systemd services: a zero-config "something is broken" signal.
     // `--no-legend`/`--no-pager` give a clean, script-parseable list.
     "systemctl list-units --type=service --state=failed --no-legend --no-pager",
+    // Container state: crash-looping (`Restarting`) or failing-healthcheck
+    // (`unhealthy`) containers are a zero-config "a service is broken" signal.
+    // `-a` lists all states, so a container caught mid-backoff is still seen. Both
+    // runtimes are probed; a missing one just errors and is ignored.
+    "docker ps -a",
+    "podman ps -a",
     // Privileged read-only checks (run only on targets opted in with
     // `privileged = true`; the operator grants NOPASSWD sudo for exactly these).
     // `sudo -n` never prompts - it fails fast if not permitted.

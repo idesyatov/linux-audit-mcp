@@ -7,7 +7,8 @@
     "health-disk": "ok",
     "health-iowait": "ok",
     "health-connections": "ok",
-    "health-failed-units": "ok"
+    "health-failed-units": "ok",
+    "health-containers": "ok"
   },
   "overall": "ok"
 }

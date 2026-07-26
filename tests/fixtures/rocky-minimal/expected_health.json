@@ -1,5 +1,5 @@
 {
-  "description": "rocky-minimal: overloaded CPU and near-full root disk push load/disk to crit; also a failed systemd service (httpd)",
+  "description": "rocky-minimal: overloaded CPU and near-full root disk push load/disk to crit; also a failed systemd service (httpd) and a crash-looping podman container (mtproxy, Restarting)",
   "metrics": {
     "health-load": "crit",
     "health-memory": "ok",
@@ -7,7 +7,8 @@
     "health-disk": "crit",
     "health-iowait": "crit",
     "health-connections": "ok",
-    "health-failed-units": "warn"
+    "health-failed-units": "warn",
+    "health-containers": "crit"
   },
   "overall": "crit"
 }

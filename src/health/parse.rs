@@ -48,6 +48,32 @@ pub fn parse_failed_units(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Containers in a broken state from `docker ps -a` / `podman ps -a` table
+/// output. Returns `(name, state)` where state is `"restarting"` (crash loop) or
+/// `"unhealthy"` (failing healthcheck). The container name is the last column;
+/// the STATUS keywords are matched anywhere on the line, so exact column
+/// alignment doesn't matter (STATUS/PORTS contain spaces and resist splitting).
+/// The header and healthy/stopped (`Up`/`Exited`) containers are skipped.
+pub fn parse_container_problems(output: &str) -> Vec<(String, &'static str)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with("CONTAINER ID") {
+                return None;
+            }
+            let name = line.split_whitespace().last()?;
+            if line.contains("Restarting") {
+                Some((name.to_string(), "restarting"))
+            } else if line.contains("(unhealthy)") {
+                Some((name.to_string(), "unhealthy"))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Memory and swap totals in bytes, from `free -b`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemInfo {
@@ -335,6 +361,30 @@ mod tests {
         );
         // A stray non-unit line (no dot) is skipped.
         assert!(parse_failed_units("garbage line here\n").is_empty());
+    }
+
+    #[test]
+    fn container_problems() {
+        let out = "CONTAINER ID   IMAGE          COMMAND   CREATED       STATUS                       PORTS   NAMES\n\
+                   a1b2c3d4e5f6   nginx:latest   \"...\"     2 days ago    Up 2 days                    80/tcp  web\n\
+                   b2c3d4e5f6a7   redis:7        \"...\"     2 days ago    Up 2 days (healthy)          6379/tcp cache\n\
+                   c3d4e5f6a7b8   postgres:16    \"...\"     3 days ago    Up 3 days (unhealthy)        5432/tcp db\n\
+                   d4e5f6a7b8c9   proxy:latest   \"...\"     3 months ago  Restarting (2) 5 seconds ago 443/tcp mtproxy\n\
+                   e5f6a7b8c9d0   old:latest     \"...\"     1 week ago    Exited (0) 3 days ago                stopped\n";
+        let p = parse_container_problems(out);
+        assert_eq!(
+            p,
+            vec![
+                ("db".to_string(), "unhealthy"),
+                ("mtproxy".to_string(), "restarting"),
+            ]
+        );
+        // Header-only / empty output -> nothing.
+        assert!(parse_container_problems(
+            "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES\n"
+        )
+        .is_empty());
+        assert!(parse_container_problems("").is_empty());
     }
 
     #[test]

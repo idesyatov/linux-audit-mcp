@@ -622,12 +622,19 @@ reported `UNKNOWN` and never gates.
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |
+| `health-containers`   | `docker ps -a`, `podman ps -a`             | a `Restarting` (crash-loop) container → Crit; `unhealthy` → Warn; no runtime → n/a |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
 
 The text report's headline is a **diagnosis**: the overall status followed by a
 compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0 err
 5.0/s; disk: 92% on /`), so a sick host stands out at a glance.
+
+`health-failed-units` and `health-containers` are **zero-config liveness signals**:
+they need no per-host setup — a failed service or a crash-looping/unhealthy
+container is intrinsically a problem, so the base snapshot flags it. `health-containers`
+probes both `docker` and `podman`; if neither is installed (or the audit user can't
+run the CLI without `sudo`) the metric is `n/a` and never gates.
 
 Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Two metrics need a timed
 sample: `vmstat 1 2` takes a one-second CPU sample for I/O-wait, and network
