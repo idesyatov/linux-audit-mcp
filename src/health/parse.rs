@@ -29,6 +29,25 @@ pub fn parse_nproc(output: &str) -> Option<u32> {
     output.trim().lines().next()?.trim().parse().ok()
 }
 
+/// Names of failed systemd units from `systemctl list-units --state=failed
+/// --no-legend`. Each line is `UNIT LOAD ACTIVE SUB DESCRIPTION`, optionally
+/// prefixed with a status bullet (`●`/`*`); the unit name is the first token and
+/// always contains a `.` (e.g. `nginx.service`). Blank lines and any stray
+/// non-unit line are skipped, so empty output (no failed units) yields `[]`.
+pub fn parse_failed_units(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let unit = line
+                .trim()
+                .trim_start_matches(['●', '*', ' '])
+                .split_whitespace()
+                .next()?;
+            unit.contains('.').then(|| unit.to_string())
+        })
+        .collect()
+}
+
 /// Memory and swap totals in bytes, from `free -b`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemInfo {
@@ -300,6 +319,22 @@ mod tests {
         assert_eq!(parse_nproc("4\n"), Some(4));
         assert_eq!(parse_nproc("  8 "), Some(8));
         assert_eq!(parse_nproc("x"), None);
+    }
+
+    #[test]
+    fn failed_units() {
+        // Empty output = no failed units.
+        assert!(parse_failed_units("").is_empty());
+        assert!(parse_failed_units("\n  \n").is_empty());
+        // Plain lines and a leading status bullet are both handled.
+        let out = "nginx.service    loaded failed failed A high performance web server\n\
+                   ● docker.service loaded failed failed Docker Application Container Engine\n";
+        assert_eq!(
+            parse_failed_units(out),
+            vec!["nginx.service".to_string(), "docker.service".to_string()]
+        );
+        // A stray non-unit line (no dot) is skipped.
+        assert!(parse_failed_units("garbage line here\n").is_empty());
     }
 
     #[test]

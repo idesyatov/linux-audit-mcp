@@ -1,12 +1,13 @@
 {
-  "description": "rocky-minimal: overloaded CPU and near-full root disk push load/disk to crit",
+  "description": "rocky-minimal: overloaded CPU and near-full root disk push load/disk to crit; also a failed systemd service (httpd)",
   "metrics": {
     "health-load": "crit",
     "health-memory": "ok",
     "health-swap": "ok",
     "health-disk": "crit",
     "health-iowait": "crit",
-    "health-connections": "ok"
+    "health-connections": "ok",
+    "health-failed-units": "warn"
   },
   "overall": "crit"
 }

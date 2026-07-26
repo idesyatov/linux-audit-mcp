@@ -6,7 +6,8 @@
     "health-swap": "ok",
     "health-disk": "ok",
     "health-iowait": "ok",
-    "health-connections": "ok"
+    "health-connections": "ok",
+    "health-failed-units": "ok"
   },
   "overall": "ok"
 }

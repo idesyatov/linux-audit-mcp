@@ -28,19 +28,32 @@ const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
 /// single-shot command whose last row is the current delta (parsed in [`evaluate`]).
 const VMSTAT: &str = "vmstat 1 2";
+/// Failed systemd services - a zero-config "something is broken" signal.
+const SYSTEMCTL_FAILED: &str =
+    "systemctl list-units --type=service --state=failed --no-legend --no-pager";
 /// Sampled twice (not single-shot) to derive throughput and error rate, so it is
 /// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
 /// [`evaluate`].
 const NETDEV: &str = "cat /proc/net/dev";
 
 /// Commands snapped exactly once per snapshot.
-const SINGLE_SHOT: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, VMSTAT];
+const SINGLE_SHOT: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, VMSTAT, SYSTEMCTL_FAILED];
 
 /// Every read-only command the health snapshot may issue (each must be in the
 /// catalog; see the invariant test). Consumed only by the invariant test and
 /// evals; the run path uses [`SINGLE_SHOT`] plus [`NETDEV`].
 #[allow(dead_code)]
-pub const HEALTH_COMMANDS: &[&str] = &[UPTIME, NPROC, FREE, DF, PS, SS, VMSTAT, NETDEV];
+pub const HEALTH_COMMANDS: &[&str] = &[
+    UPTIME,
+    NPROC,
+    FREE,
+    DF,
+    PS,
+    SS,
+    VMSTAT,
+    SYSTEMCTL_FAILED,
+    NETDEV,
+];
 
 /// A metric's verdict against its thresholds. `Unknown` means the input was
 /// missing or unparseable - it never counts toward the overall status.
@@ -165,6 +178,10 @@ pub struct Thresholds {
     pub net_err_crit_pps: f64,
     /// Gap between the two `/proc/net/dev` samples, in seconds.
     pub net_sample_secs: u64,
+    /// Failed systemd services: any failed unit is a `Warn`; this many or more
+    /// escalate to `Crit`. `0` disables the escalation (failed units stay `Warn`),
+    /// which is the default - a single benign oneshot failure shouldn't be `Crit`.
+    pub failed_units_crit: u32,
     /// How many hot processes to list per resource.
     pub top_n: usize,
 }
@@ -189,6 +206,7 @@ impl Default for Thresholds {
             net_err_warn_pps: 1.0,
             net_err_crit_pps: 10.0,
             net_sample_secs: 1,
+            failed_units_crit: 0,
             top_n: 5,
         }
     }
@@ -380,6 +398,44 @@ fn network_metric(outputs: &Outputs) -> Metric {
     }
 }
 
+/// Failed systemd services. A zero-config liveness signal: any failed unit is a
+/// `Warn` (something that should be running isn't); `failed_units_crit` or more
+/// escalate to `Crit`. Missing `systemctl` (non-systemd host) reports `Unknown`,
+/// so it never gates. `numeric` is the failed count, so a jump vs this host's
+/// history is picked up by the anomaly layer.
+fn failed_units_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-failed-units";
+    const TITLE: &str = "Failed services";
+    let Some(text) = out(outputs, SYSTEMCTL_FAILED) else {
+        return unknown(ID, TITLE, "systemctl unavailable");
+    };
+    let units = parse::parse_failed_units(text);
+    let n = units.len();
+    let status = if n == 0 {
+        HealthStatus::Ok
+    } else if thr.failed_units_crit > 0 && n as u32 >= thr.failed_units_crit {
+        HealthStatus::Crit
+    } else {
+        HealthStatus::Warn
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: if n == 0 {
+            "no failed units".to_string()
+        } else {
+            format!("{n} failed unit(s)")
+        },
+        detail: if units.is_empty() {
+            "no systemd services in failed state".to_string()
+        } else {
+            units.join(", ")
+        },
+        numeric: Some(n as f64),
+    }
+}
+
 /// Ok/Warn/Crit for one throughput bound; a threshold of `0` disables it.
 fn bound_status(value: f64, warn: f64, crit: f64) -> HealthStatus {
     if crit > 0.0 && value >= crit {
@@ -557,6 +613,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(disk_metric(outputs, thr));
     metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
+    metrics.push(failed_units_metric(outputs, thr));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
     let top_cpu: Vec<ProcInfo> = procs.iter().take(thr.top_n).cloned().collect();
@@ -759,6 +816,39 @@ mod tests {
         // Missing vmstat -> Unknown (never gates).
         assert_eq!(
             iowait_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn failed_units_status() {
+        let thr = Thresholds::default();
+        const CMD: &str =
+            "systemctl list-units --type=service --state=failed --no-legend --no-pager";
+        // No failed units (empty output) -> Ok.
+        assert_eq!(
+            failed_units_metric(&outputs(&[(CMD, "")]), &thr).status,
+            HealthStatus::Ok
+        );
+        // One failed unit -> Warn (default: crit escalation disabled).
+        let one = "nginx.service loaded failed failed A web server\n";
+        let m = failed_units_metric(&outputs(&[(CMD, one)]), &thr);
+        assert_eq!(m.status, HealthStatus::Warn);
+        assert!(m.detail.contains("nginx.service"));
+        assert_eq!(m.numeric, Some(1.0));
+        // With a crit threshold, enough failed units escalate to Crit.
+        let strict = Thresholds {
+            failed_units_crit: 2,
+            ..Thresholds::default()
+        };
+        let two = "a.service x x x d\nb.service x x x d\n";
+        assert_eq!(
+            failed_units_metric(&outputs(&[(CMD, two)]), &strict).status,
+            HealthStatus::Crit
+        );
+        // Missing systemctl -> Unknown (never gates).
+        assert_eq!(
+            failed_units_metric(&outputs(&[]), &thr).status,
             HealthStatus::Unknown
         );
     }

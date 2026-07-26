@@ -49,6 +49,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",
+    // Failed systemd services: a zero-config "something is broken" signal.
+    // `--no-legend`/`--no-pager` give a clean, script-parseable list.
+    "systemctl list-units --type=service --state=failed --no-legend --no-pager",
     // Privileged read-only checks (run only on targets opted in with
     // `privileged = true`; the operator grants NOPASSWD sudo for exactly these).
     // `sudo -n` never prompts - it fails fast if not permitted.

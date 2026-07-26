@@ -1,12 +1,13 @@
 {
-  "description": "debian-default: busy host, load/memory/disk elevated into warn",
+  "description": "debian-default: busy host, load/memory/disk elevated into warn, plus a failed systemd service (nginx)",
   "metrics": {
     "health-load": "warn",
     "health-memory": "warn",
     "health-swap": "ok",
     "health-disk": "warn",
     "health-iowait": "warn",
-    "health-connections": "ok"
+    "health-connections": "ok",
+    "health-failed-units": "warn"
   },
   "overall": "warn"
 }

@@ -260,6 +260,7 @@ net_tx_crit_mibps = 0.0
 net_err_warn_pps = 1.0    # per-interface error rate (pkts/s); errors on a healthy NIC are ~0
 net_err_crit_pps = 10.0
 net_sample_secs = 1       # gap between the two /proc/net/dev samples
+failed_units_crit = 0     # failed systemd services: any → Warn; ≥ this count → Crit (0 = never Crit)
 top_n = 5                 # hot processes listed per resource
 ```
 
@@ -620,6 +621,7 @@ reported `UNKNOWN` and never gates.
 | `health-disk`         | `df -P`                                    | worst real filesystem % ≥ threshold      |
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
+| `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
 
