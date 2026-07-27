@@ -45,8 +45,14 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "nproc",
     "free -b",
     "df -P",
+    // Inode usage per filesystem (`-i`); a disk with free space but no free inodes
+    // still can't create files. Portable (`-P`) columns match `df -P`.
+    "df -Pi",
     "ps -eo pid,comm,pcpu,pmem --sort=-pcpu",
     "ss -s",
+    // System-wide open file descriptors: `allocated  unused  max`. Nearing the max
+    // means "too many open files" for new sockets/files.
+    "cat /proc/sys/fs/file-nr",
     // Network interface counters; sampled twice to derive throughput.
     "cat /proc/net/dev",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is

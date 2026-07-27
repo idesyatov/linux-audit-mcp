@@ -216,6 +216,16 @@ pub fn parse_df(output: &str) -> Vec<Mount> {
         .collect()
 }
 
+/// Parse `/proc/sys/fs/file-nr` (`allocated  unused  max`) into
+/// `(allocated, max)` open file descriptors. `unused` is ignored (it is 0 on
+/// modern kernels). `None` if the two numbers can't be read.
+pub fn parse_file_nr(output: &str) -> Option<(u64, u64)> {
+    let f: Vec<&str> = output.split_whitespace().collect();
+    let allocated = f.first()?.parse().ok()?;
+    let max = f.get(2)?.parse().ok()?;
+    Some((allocated, max))
+}
+
 /// One process row from `ps -eo pid,comm,pcpu,pmem`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProcInfo {
@@ -501,6 +511,16 @@ mod tests {
         assert_eq!(mounts[0].use_pct, 78);
         assert_eq!(mounts[1].mount, "/data");
         assert_eq!(mounts[1].use_pct, 95);
+    }
+
+    #[test]
+    fn file_nr_reads_allocated_and_max() {
+        assert_eq!(
+            parse_file_nr("8064\t0\t9223372036854775807\n"),
+            Some((8064, 9_223_372_036_854_775_807))
+        );
+        assert_eq!(parse_file_nr("170000 0 200000"), Some((170_000, 200_000)));
+        assert_eq!(parse_file_nr("garbage"), None);
     }
 
     #[test]

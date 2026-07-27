@@ -249,8 +249,10 @@ mem_used_warn_pct = 85    # memory in use (%)
 mem_used_crit_pct = 95
 swap_used_warn_pct = 50   # swap in use (%)
 swap_used_crit_pct = 90
-disk_warn_pct = 85        # filesystem capacity (%)
+disk_warn_pct = 85        # filesystem capacity (%) — also bounds inode usage (health-inodes)
 disk_crit_pct = 95
+fd_warn_pct = 80          # open file descriptors as % of the system max (health-fd)
+fd_crit_pct = 95
 iowait_warn_pct = 20.0    # CPU time waiting on I/O (%) — host is disk-bound
 iowait_crit_pct = 50.0
 net_rx_warn_mibps = 0.0   # per-interface throughput (MiB/s); 0 disables (informational)
@@ -636,6 +638,8 @@ reported `UNKNOWN` and never gates.
 | `health-memory`       | `free -b`                                  | memory in use % ≥ threshold              |
 | `health-swap`         | `free -b`                                  | swap in use % ≥ threshold                |
 | `health-disk`         | `df -P`                                    | worst real filesystem % ≥ threshold      |
+| `health-inodes`       | `df -Pi`                                   | worst filesystem inode % ≥ disk threshold (free space but no free inodes → can't create files) |
+| `health-fd`           | `cat /proc/sys/fs/file-nr`                 | open file descriptors ≥ `fd_warn_pct`/`fd_crit_pct` of the system max (“too many open files”) |
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |

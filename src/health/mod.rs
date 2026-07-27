@@ -23,6 +23,11 @@ const UPTIME: &str = "uptime";
 const NPROC: &str = "nproc";
 const FREE: &str = "free -b";
 const DF: &str = "df -P";
+/// Inode usage (`-i`); portable columns identical to [`DF`], so [`parse::parse_df`]
+/// reads it too (the percent is the same column).
+const DF_INODES: &str = "df -Pi";
+/// System-wide open file descriptors: `allocated  unused  max`.
+const FILE_NR: &str = "cat /proc/sys/fs/file-nr";
 const PS: &str = "ps -eo pid,comm,pcpu,pmem --sort=-pcpu";
 const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
@@ -51,6 +56,8 @@ const SINGLE_SHOT: &[&str] = &[
     NPROC,
     FREE,
     DF,
+    DF_INODES,
+    FILE_NR,
     PS,
     SS,
     VMSTAT,
@@ -68,6 +75,8 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     NPROC,
     FREE,
     DF,
+    DF_INODES,
+    FILE_NR,
     PS,
     SS,
     VMSTAT,
@@ -213,9 +222,13 @@ pub struct Thresholds {
     /// Swap in use (percent).
     pub swap_used_warn_pct: u8,
     pub swap_used_crit_pct: u8,
-    /// Filesystem capacity (percent).
+    /// Filesystem capacity (percent). Also bounds inode usage (`health-inodes`) -
+    /// both are "this filesystem is filling up", just blocks vs inodes.
     pub disk_warn_pct: u8,
     pub disk_crit_pct: u8,
+    /// Open file descriptors as a percent of the system-wide max (`health-fd`).
+    pub fd_warn_pct: u8,
+    pub fd_crit_pct: u8,
     /// CPU time waiting on I/O (`wa`, percent); a sustained high value means the
     /// host is disk-bound.
     pub iowait_warn_pct: f64,
@@ -252,6 +265,8 @@ impl Default for Thresholds {
             swap_used_crit_pct: 90,
             disk_warn_pct: 85,
             disk_crit_pct: 95,
+            fd_warn_pct: 80,
+            fd_crit_pct: 95,
             iowait_warn_pct: 20.0,
             iowait_crit_pct: 50.0,
             net_rx_warn_mibps: 0.0,
@@ -416,6 +431,62 @@ fn disk_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
         value: format!("{}% on {}", worst.use_pct, worst.mount),
         detail: detail.join(", "),
         numeric: Some(worst.use_pct as f64),
+    }
+}
+
+/// Inode usage per filesystem, from `df -Pi`. A filesystem can exhaust its inodes
+/// while blocks are free (lots of tiny files), and then no file can be created -
+/// so this is tracked alongside, but separately from, block capacity. Reuses the
+/// disk thresholds (same "filesystem filling up" nature) and [`parse::parse_df`]
+/// (the portable inode columns place the percent in the same position).
+fn inodes_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-inodes";
+    const TITLE: &str = "Inode usage";
+    let Some(mounts) = out(outputs, DF_INODES).map(parse::parse_df) else {
+        return unknown(ID, TITLE, "df -i unavailable");
+    };
+    let Some(worst) = mounts.iter().max_by_key(|m| m.use_pct) else {
+        return unknown(ID, TITLE, "no real filesystems reported");
+    };
+    let mut detail: Vec<String> = mounts
+        .iter()
+        .map(|m| format!("{} {}%", m.mount, m.use_pct))
+        .collect();
+    detail.sort();
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(
+            worst.use_pct as f64,
+            thr.disk_warn_pct as f64,
+            thr.disk_crit_pct as f64,
+        ),
+        value: format!("{}% on {}", worst.use_pct, worst.mount),
+        detail: detail.join(", "),
+        numeric: Some(worst.use_pct as f64),
+    }
+}
+
+/// System-wide open file descriptors as a percent of the kernel max, from
+/// `/proc/sys/fs/file-nr`. Nearing the max means new sockets/files fail with
+/// "too many open files" - a fleet-wide outage cause independent of CPU/memory.
+fn fd_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-fd";
+    const TITLE: &str = "Open file descriptors";
+    let Some((allocated, max)) = out(outputs, FILE_NR).and_then(parse::parse_file_nr) else {
+        return unknown(ID, TITLE, "file-nr unavailable");
+    };
+    if max == 0 {
+        return unknown(ID, TITLE, "file-nr reports no maximum");
+    }
+    let pct = allocated as f64 / max as f64 * 100.0;
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(pct, thr.fd_warn_pct as f64, thr.fd_crit_pct as f64),
+        value: format!("{pct:.0}% used"),
+        detail: format!("{allocated} of {max} file descriptors allocated"),
+        numeric: Some(pct),
     }
 }
 
@@ -714,6 +785,8 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     let mut metrics = vec![load_metric(outputs, thr)];
     metrics.extend(memory_metrics(outputs, thr));
     metrics.push(disk_metric(outputs, thr));
+    metrics.push(inodes_metric(outputs, thr));
+    metrics.push(fd_metric(outputs, thr));
     metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
     metrics.push(failed_units_metric(outputs, thr));
@@ -1061,6 +1134,35 @@ mod tests {
         let m = disk_metric(&outputs(&[("df -P", df)]), &thr);
         assert_eq!(m.status, HealthStatus::Crit);
         assert!(m.value.contains("/data"));
+    }
+
+    #[test]
+    fn inodes_worst_mount_and_unknown() {
+        let thr = Thresholds::default();
+        // Blocks free but inodes nearly gone on / -> Crit (reuses disk thresholds).
+        let dfi = "Filesystem Inodes IUsed IFree IUse% Mounted on\n\
+                   /dev/sda1 1000000 980000 20000 98% /\n\
+                   tmpfs 100000 5 99995 1% /run\n";
+        let m = inodes_metric(&outputs(&[("df -Pi", dfi)]), &thr);
+        assert_eq!(m.status, HealthStatus::Crit);
+        assert!(m.value.contains("98%"), "{}", m.value);
+        // Missing df -Pi -> Unknown (never gates).
+        assert_eq!(
+            inodes_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn fd_thresholds_and_unknown() {
+        let thr = Thresholds::default(); // fd warn 80, crit 95
+        let m = |a: &str| fd_metric(&outputs(&[("cat /proc/sys/fs/file-nr", a)]), &thr).status;
+        assert_eq!(m("4096 0 400000"), HealthStatus::Ok); // ~1%
+        assert_eq!(m("170000 0 200000"), HealthStatus::Warn); // 85%
+        assert_eq!(m("196000 0 200000"), HealthStatus::Crit); // 98%
+                                                              // Missing input or a zero maximum -> Unknown (never gates).
+        assert_eq!(fd_metric(&outputs(&[]), &thr).status, HealthStatus::Unknown);
+        assert_eq!(m("5 0 0"), HealthStatus::Unknown); // max 0
     }
 
     #[test]

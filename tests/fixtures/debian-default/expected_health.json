@@ -5,6 +5,8 @@
     "health-memory": "warn",
     "health-swap": "ok",
     "health-disk": "warn",
+    "health-inodes": "ok",
+    "health-fd": "warn",
     "health-iowait": "warn",
     "health-connections": "ok",
     "health-failed-units": "warn",
