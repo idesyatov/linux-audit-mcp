@@ -226,6 +226,33 @@ pub fn parse_file_nr(output: &str) -> Option<(u64, u64)> {
     Some((allocated, max))
 }
 
+/// Parse the two-line `cat nf_conntrack_count nf_conntrack_max` output into
+/// `(count, max)` tracked connections. `None` if either number is missing (e.g.
+/// the conntrack module isn't loaded, so the files don't exist).
+pub fn parse_conntrack(output: &str) -> Option<(u64, u64)> {
+    let mut nums = output.lines().filter_map(|l| l.trim().parse::<u64>().ok());
+    Some((nums.next()?, nums.next()?))
+}
+
+/// Parse the `cat /proc/loadavg /proc/sys/kernel/pid_max` output into
+/// `(tasks, pid_max)`. `tasks` is the total of loadavg's `running/total` field
+/// (kernel scheduling entities: processes + threads), which consume PIDs;
+/// `pid_max` is the ceiling they approach. `None` if either can't be read.
+pub fn parse_pid_usage(output: &str) -> Option<(u64, u64)> {
+    let mut lines = output.lines();
+    let loadavg = lines.next()?;
+    // "0.15 0.10 0.05 1/234 5678" -> field 3 is running/total.
+    let tasks = loadavg
+        .split_whitespace()
+        .nth(3)?
+        .split('/')
+        .nth(1)?
+        .parse()
+        .ok()?;
+    let pid_max = lines.next()?.trim().parse().ok()?;
+    Some((tasks, pid_max))
+}
+
 /// One process row from `ps -eo pid,comm,pcpu,pmem`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProcInfo {
@@ -521,6 +548,21 @@ mod tests {
         );
         assert_eq!(parse_file_nr("170000 0 200000"), Some((170_000, 200_000)));
         assert_eq!(parse_file_nr("garbage"), None);
+    }
+
+    #[test]
+    fn conntrack_reads_count_and_max() {
+        assert_eq!(parse_conntrack("12345\n262144\n"), Some((12345, 262_144)));
+        assert_eq!(parse_conntrack("5"), None); // max line missing (module absent)
+    }
+
+    #[test]
+    fn pid_usage_reads_tasks_and_max() {
+        assert_eq!(
+            parse_pid_usage("0.15 0.10 0.05 1/234 5678\n32768\n"),
+            Some((234, 32768))
+        );
+        assert_eq!(parse_pid_usage("bad\n32768\n"), None);
     }
 
     #[test]

@@ -7,6 +7,8 @@
     "health-disk": "warn",
     "health-inodes": "ok",
     "health-fd": "warn",
+    "health-conntrack": "warn",
+    "health-pids": "ok",
     "health-iowait": "warn",
     "health-connections": "ok",
     "health-failed-units": "warn",

@@ -53,6 +53,13 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // System-wide open file descriptors: `allocated  unused  max`. Nearing the max
     // means "too many open files" for new sockets/files.
     "cat /proc/sys/fs/file-nr",
+    // Netfilter connection-tracking table: current count and max. A full table
+    // ("nf_conntrack: table full") drops new connections - a NAT/firewall/proxy
+    // outage. Both files vanish when the module isn't loaded (then: Unknown).
+    "cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max",
+    // Task saturation: /proc/loadavg (its 4th field is running/total tasks) and the
+    // PID ceiling. Near the ceiling, fork()/clone() fail and nothing new can start.
+    "cat /proc/loadavg /proc/sys/kernel/pid_max",
     // Network interface counters; sampled twice to derive throughput.
     "cat /proc/net/dev",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is

@@ -28,6 +28,12 @@ const DF: &str = "df -P";
 const DF_INODES: &str = "df -Pi";
 /// System-wide open file descriptors: `allocated  unused  max`.
 const FILE_NR: &str = "cat /proc/sys/fs/file-nr";
+/// Netfilter conntrack table: current `count` then `max` (two lines). Absent when
+/// the module isn't loaded.
+const CONNTRACK: &str =
+    "cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max";
+/// Task saturation: `/proc/loadavg` (running/total tasks) then the PID ceiling.
+const PIDS: &str = "cat /proc/loadavg /proc/sys/kernel/pid_max";
 const PS: &str = "ps -eo pid,comm,pcpu,pmem --sort=-pcpu";
 const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
@@ -58,6 +64,8 @@ const SINGLE_SHOT: &[&str] = &[
     DF,
     DF_INODES,
     FILE_NR,
+    CONNTRACK,
+    PIDS,
     PS,
     SS,
     VMSTAT,
@@ -77,6 +85,8 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     DF,
     DF_INODES,
     FILE_NR,
+    CONNTRACK,
+    PIDS,
     PS,
     SS,
     VMSTAT,
@@ -229,6 +239,12 @@ pub struct Thresholds {
     /// Open file descriptors as a percent of the system-wide max (`health-fd`).
     pub fd_warn_pct: u8,
     pub fd_crit_pct: u8,
+    /// Conntrack table fill as a percent of `nf_conntrack_max` (`health-conntrack`).
+    pub conntrack_warn_pct: u8,
+    pub conntrack_crit_pct: u8,
+    /// Kernel tasks as a percent of `pid_max` (`health-pids`).
+    pub pid_warn_pct: u8,
+    pub pid_crit_pct: u8,
     /// CPU time waiting on I/O (`wa`, percent); a sustained high value means the
     /// host is disk-bound.
     pub iowait_warn_pct: f64,
@@ -267,6 +283,10 @@ impl Default for Thresholds {
             disk_crit_pct: 95,
             fd_warn_pct: 80,
             fd_crit_pct: 95,
+            conntrack_warn_pct: 80,
+            conntrack_crit_pct: 90,
+            pid_warn_pct: 80,
+            pid_crit_pct: 90,
             iowait_warn_pct: 20.0,
             iowait_crit_pct: 50.0,
             net_rx_warn_mibps: 0.0,
@@ -486,6 +506,57 @@ fn fd_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
         status: threshold_status(pct, thr.fd_warn_pct as f64, thr.fd_crit_pct as f64),
         value: format!("{pct:.0}% used"),
         detail: format!("{allocated} of {max} file descriptors allocated"),
+        numeric: Some(pct),
+    }
+}
+
+/// Netfilter connection-tracking table fill, from `nf_conntrack_count` /
+/// `nf_conntrack_max`. A full table drops new connections ("nf_conntrack: table
+/// full") - a NAT/firewall/proxy outage that CPU and memory metrics miss. Absent
+/// (module not loaded, e.g. a host with no connection tracking) reports `Unknown`.
+fn conntrack_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-conntrack";
+    const TITLE: &str = "Conntrack table";
+    let Some((count, max)) = out(outputs, CONNTRACK).and_then(parse::parse_conntrack) else {
+        return unknown(ID, TITLE, "conntrack not available (module not loaded)");
+    };
+    if max == 0 {
+        return unknown(ID, TITLE, "nf_conntrack_max is zero");
+    }
+    let pct = count as f64 / max as f64 * 100.0;
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(
+            pct,
+            thr.conntrack_warn_pct as f64,
+            thr.conntrack_crit_pct as f64,
+        ),
+        value: format!("{pct:.0}% used"),
+        detail: format!("{count} of {max} tracked connections"),
+        numeric: Some(pct),
+    }
+}
+
+/// Task/PID saturation, from `/proc/loadavg` (total tasks) and `pid_max`. As tasks
+/// approach the ceiling, `fork()`/`clone()` fail and nothing new can start (a
+/// runaway thread/process leak or fork bomb) - independent of CPU/memory.
+fn pids_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-pids";
+    const TITLE: &str = "Process/PID saturation";
+    let Some((tasks, pid_max)) = out(outputs, PIDS).and_then(parse::parse_pid_usage) else {
+        return unknown(ID, TITLE, "loadavg/pid_max unavailable");
+    };
+    if pid_max == 0 {
+        return unknown(ID, TITLE, "pid_max is zero");
+    }
+    let pct = tasks as f64 / pid_max as f64 * 100.0;
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(pct, thr.pid_warn_pct as f64, thr.pid_crit_pct as f64),
+        value: format!("{pct:.0}% used"),
+        detail: format!("{tasks} of {pid_max} max PIDs (tasks/threads)"),
         numeric: Some(pct),
     }
 }
@@ -787,6 +858,8 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(disk_metric(outputs, thr));
     metrics.push(inodes_metric(outputs, thr));
     metrics.push(fd_metric(outputs, thr));
+    metrics.push(conntrack_metric(outputs, thr));
+    metrics.push(pids_metric(outputs, thr));
     metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
     metrics.push(failed_units_metric(outputs, thr));
@@ -1163,6 +1236,48 @@ mod tests {
                                                               // Missing input or a zero maximum -> Unknown (never gates).
         assert_eq!(fd_metric(&outputs(&[]), &thr).status, HealthStatus::Unknown);
         assert_eq!(m("5 0 0"), HealthStatus::Unknown); // max 0
+    }
+
+    #[test]
+    fn conntrack_thresholds_and_unknown() {
+        let thr = Thresholds::default(); // warn 80, crit 90
+        let m = |a: &str| {
+            conntrack_metric(
+                &outputs(&[(
+                    "cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max",
+                    a,
+                )]),
+                &thr,
+            )
+            .status
+        };
+        assert_eq!(m("5000\n262144\n"), HealthStatus::Ok); // ~2%
+        assert_eq!(m("170000\n200000\n"), HealthStatus::Warn); // 85%
+        assert_eq!(m("195000\n200000\n"), HealthStatus::Crit); // 97%
+                                                               // Module not loaded (files absent) -> Unknown, never gates.
+        assert_eq!(
+            conntrack_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn pids_thresholds_and_unknown() {
+        let thr = Thresholds::default(); // warn 80, crit 90
+        let m = |a: &str| {
+            pids_metric(
+                &outputs(&[("cat /proc/loadavg /proc/sys/kernel/pid_max", a)]),
+                &thr,
+            )
+            .status
+        };
+        assert_eq!(m("0.1 0.1 0.1 1/150 900\n32768\n"), HealthStatus::Ok); // ~0.5%
+        assert_eq!(m("5 5 5 3/27000 900\n32768\n"), HealthStatus::Warn); // 82%
+        assert_eq!(m("9 9 9 5/31000 900\n32768\n"), HealthStatus::Crit); // 95%
+        assert_eq!(
+            pids_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
     }
 
     #[test]

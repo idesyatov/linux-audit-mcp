@@ -7,6 +7,8 @@
     "health-disk": "crit",
     "health-inodes": "crit",
     "health-fd": "ok",
+    "health-conntrack": "crit",
+    "health-pids": "warn",
     "health-iowait": "crit",
     "health-connections": "ok",
     "health-failed-units": "warn",
