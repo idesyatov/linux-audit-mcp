@@ -590,11 +590,18 @@ blocks resolved) instead of parsing `/etc/ssh/sshd_config`, so `ssh-weak-crypto`
 and friends become authoritative. If that command isn't granted, the ssh checks
 fall back to the file — the audit never breaks.
 
+It also **un-blinds the container health metric**: on many hosts `docker`/`podman`
+need root or docker-group membership, so the unprivileged `docker ps -a` returns
+nothing and `health-containers` (an operational metric, not a check) reports `n/a`.
+On an opted-in target the snapshot runs `sudo -n docker ps -a` / `sudo -n podman
+ps -a` instead, and falls back to the plain command if the grant is missing — so a
+docker-group host never regresses.
+
 Grant the auditor **passwordless sudo for exactly these commands** — never `ALL`.
 On the target (`visudo -f /etc/sudoers.d/linux-audit`):
 
 ```
-auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset
+auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset, /usr/bin/docker ps -a, /usr/bin/podman ps -a
 ```
 
 Skipped checks are excluded from the score (like `error`); the report shows them
@@ -622,7 +629,7 @@ reported `UNKNOWN` and never gates.
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |
-| `health-containers`   | `docker ps -a`, `podman ps -a`             | a `Restarting` (crash-loop) container → Crit; `unhealthy` → Warn; no runtime → n/a |
+| `health-containers`   | `docker ps -a`, `podman ps -a` (`sudo -n …` on privileged targets) | a `Restarting` (crash-loop) container → Crit; `unhealthy` → Warn; no runtime → n/a |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
 
@@ -633,8 +640,10 @@ compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0
 `health-failed-units` and `health-containers` are **zero-config liveness signals**:
 they need no per-host setup — a failed service or a crash-looping/unhealthy
 container is intrinsically a problem, so the base snapshot flags it. `health-containers`
-probes both `docker` and `podman`; if neither is installed (or the audit user can't
-run the CLI without `sudo`) the metric is `n/a` and never gates.
+probes both `docker` and `podman`; if neither is installed the metric is `n/a` and
+never gates. On hosts where the CLI needs root/docker-group, mark the target
+`privileged = true` so the snapshot uses `sudo -n docker ps -a` (see **Privileged
+checks**) — otherwise the metric stays `n/a`.
 
 From the **second** snapshot onward these two signals also flag **between-run
 changes** versus the previous stored snapshot: a container whose uptime dropped

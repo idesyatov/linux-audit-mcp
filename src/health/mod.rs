@@ -35,6 +35,11 @@ const SYSTEMCTL_FAILED: &str =
 /// states so a crash-looping container caught mid-backoff is still seen.
 const DOCKER_PS: &str = "docker ps -a";
 const PODMAN_PS: &str = "podman ps -a";
+/// Privileged variants: on many hosts `docker`/`podman` need root or docker-group
+/// membership, so the plain command returns nothing and the metric goes blind. On
+/// a `privileged` target these are tried first (see [`container_command`]).
+const SUDO_DOCKER_PS: &str = "sudo -n docker ps -a";
+const SUDO_PODMAN_PS: &str = "sudo -n podman ps -a";
 /// Sampled twice (not single-shot) to derive throughput and error rate, so it is
 /// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
 /// [`evaluate`].
@@ -69,8 +74,26 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     SYSTEMCTL_FAILED,
     DOCKER_PS,
     PODMAN_PS,
+    SUDO_DOCKER_PS,
+    SUDO_PODMAN_PS,
     NETDEV,
 ];
+
+/// The wire command for a container probe: on a `privileged` target the `sudo -n`
+/// variant is authoritative (many hosts need root/docker-group to run the CLI);
+/// otherwise the plain command. Returns `(preferred, fallback)` - the fallback is
+/// the plain command, tried if the privileged read fails (a missing sudo grant
+/// must not regress a host where the plain command already worked). A non-privileged
+/// target has no fallback.
+fn container_command(cmd: &str, privileged: bool) -> (&'static str, Option<&'static str>) {
+    match (cmd, privileged) {
+        (DOCKER_PS, true) => (SUDO_DOCKER_PS, Some(DOCKER_PS)),
+        (PODMAN_PS, true) => (SUDO_PODMAN_PS, Some(PODMAN_PS)),
+        (DOCKER_PS, false) => (DOCKER_PS, None),
+        (PODMAN_PS, false) => (PODMAN_PS, None),
+        _ => (DOCKER_PS, None), // unreachable: only called for the two container cmds
+    }
+}
 
 /// A metric's verdict against its thresholds. `Unknown` means the input was
 /// missing or unparseable - it never counts toward the overall status.
@@ -743,21 +766,39 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
 ///
 /// Host-level failures (auth, connection, timeout) abort. A per-command remote
 /// failure becomes an `Unknown` metric for whatever needed it; the rest run.
-pub async fn collect(ssh: &SshConfig, thr: &Thresholds) -> Result<HealthReport, SshError> {
+pub async fn collect(
+    ssh: &SshConfig,
+    thr: &Thresholds,
+    privileged: bool,
+) -> Result<HealthReport, SshError> {
     let mut outputs: Outputs = HashMap::new();
     for &cmd in SINGLE_SHOT {
-        match ssh.run(cmd).await {
-            Ok(out) => {
-                outputs.insert(cmd, Ok(out.stdout));
+        let value = if cmd == DOCKER_PS || cmd == PODMAN_PS {
+            // Container probes may need privilege; the result is stored under the
+            // canonical key (`docker ps -a`) so evaluate()/parsing stay unaware of
+            // which variant ran. Prefer the privileged read, then fall back to the
+            // plain command so a missing sudo grant never regresses a docker-group
+            // host that already worked unprivileged.
+            let (preferred, fallback) = container_command(cmd, privileged);
+            match run_single(ssh, preferred).await? {
+                Some(stdout) => Ok(stdout),
+                None => match fallback {
+                    Some(plain) => run_single(ssh, plain)
+                        .await?
+                        .ok_or_else(|| "container runtime unavailable".to_string()),
+                    None => Err("container runtime unavailable".to_string()),
+                },
             }
-            Err(SshError::RemoteCommand { code, stderr }) => {
-                outputs.insert(
-                    cmd,
-                    Err(format!("remote command failed (code {code:?}): {stderr}")),
-                );
+        } else {
+            match ssh.run(cmd).await {
+                Ok(out) => Ok(out.stdout),
+                Err(SshError::RemoteCommand { code, stderr }) => {
+                    Err(format!("remote command failed (code {code:?}): {stderr}"))
+                }
+                Err(host_level) => return Err(host_level),
             }
-            Err(host_level) => return Err(host_level),
-        }
+        };
+        outputs.insert(cmd, value);
     }
 
     let mut report = evaluate(&outputs, thr);
@@ -787,6 +828,17 @@ pub async fn collect(ssh: &SshConfig, thr: &Thresholds) -> Result<HealthReport, 
     report.metrics.push(errors);
     report.overall = worst(&report.metrics);
     Ok(report)
+}
+
+/// Run one command: `Ok(Some(stdout))` on success, `Ok(None)` if it failed
+/// remotely (absent binary, permission denied) so the caller can fall back, and
+/// `Err` only for a host-level failure (auth/connection/timeout) that must abort.
+async fn run_single(ssh: &SshConfig, cmd: &str) -> Result<Option<String>, SshError> {
+    match ssh.run(cmd).await {
+        Ok(out) => Ok(Some(out.stdout)),
+        Err(SshError::RemoteCommand { .. }) => Ok(None),
+        Err(host_level) => Err(host_level),
+    }
 }
 
 /// Read `/proc/net/dev` twice, `net_sample_secs` apart, returning both samples
@@ -950,6 +1002,26 @@ mod tests {
             failed_units_metric(&outputs(&[]), &thr).status,
             HealthStatus::Unknown
         );
+    }
+
+    #[test]
+    fn container_command_prefers_sudo_when_privileged() {
+        // Privileged: sudo variant is preferred, plain is the fallback.
+        assert_eq!(
+            container_command(DOCKER_PS, true),
+            (SUDO_DOCKER_PS, Some(DOCKER_PS))
+        );
+        assert_eq!(
+            container_command(PODMAN_PS, true),
+            (SUDO_PODMAN_PS, Some(PODMAN_PS))
+        );
+        // Unprivileged: plain command, no fallback.
+        assert_eq!(container_command(DOCKER_PS, false), (DOCKER_PS, None));
+        assert_eq!(container_command(PODMAN_PS, false), (PODMAN_PS, None));
+        // Every wire variant is a catalog member.
+        for cmd in [SUDO_DOCKER_PS, SUDO_PODMAN_PS] {
+            assert!(crate::catalog::validate(cmd).is_ok(), "{cmd:?}");
+        }
     }
 
     #[test]

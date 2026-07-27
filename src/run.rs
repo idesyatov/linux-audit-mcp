@@ -71,13 +71,20 @@ pub async fn health_targets(
     let mut jobs = Vec::with_capacity(aliases.len());
     for alias in aliases {
         let resolved = cfg.resolve(alias)?;
-        jobs.push((alias.clone(), resolved.to_ssh_config(), resolved.health));
+        jobs.push((
+            alias.clone(),
+            resolved.to_ssh_config(),
+            resolved.health,
+            resolved.privileged,
+        ));
     }
 
     let mut set = JoinSet::new();
-    for (i, (alias, ssh, thr)) in jobs.into_iter().enumerate() {
+    for (i, (alias, ssh, thr, privileged)) in jobs.into_iter().enumerate() {
         set.spawn(async move {
-            let result = health::collect(&ssh, &thr).await.map_err(|e| e.to_string());
+            let result = health::collect(&ssh, &thr, privileged)
+                .await
+                .map_err(|e| e.to_string());
             (i, HealthOutcome { alias, result })
         });
     }

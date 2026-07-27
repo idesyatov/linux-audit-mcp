@@ -69,6 +69,12 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // Live nftables ruleset: the effective inbound firewall posture (ufw,
     // firewalld and raw nft all render here). Root-only; read-only dump.
     "sudo -n nft list ruleset",
+    // Container state as root: on many hosts `docker`/`podman` need root or
+    // docker-group membership, so the unprivileged `docker ps -a` returns nothing
+    // and the health metric goes blind. On an opted-in target these authoritative
+    // variants supersede the plain read for `health-containers`.
+    "sudo -n docker ps -a",
+    "sudo -n podman ps -a",
 ];
 
 /// Characters permitted in a command. A positive character set (not a denylist)
