@@ -1,11 +1,13 @@
-//! Kernel-domain checks (`sysctl -a`).
+//! Kernel-domain checks: system-hardening posture.
 //!
-//! Each check reads one hardening-relevant sysctl. A key that isn't reported is
-//! treated as a failure - the auditor can't confirm the safe value.
+//! Most read one hardening-relevant sysctl from `sysctl -a`; a key that isn't
+//! reported is treated as a failure - the auditor can't confirm the safe value.
+//! [`MountOptions`] is the exception, reading `/proc/mounts` to check temp-mount
+//! hardening (nosuid/nodev/noexec).
 
 use std::collections::HashMap;
 
-use super::parse::parse_sysctl;
+use super::parse::{parse_proc_mounts, parse_sysctl};
 use super::{Check, Domain, Outcome, Severity};
 
 const SYSCTL_CMD: &str = "sysctl -a";
@@ -213,6 +215,68 @@ sysctl_check!(
     "unprivileged BPF is a local privilege-escalation surface"
 );
 
+/// Sensitive world-writable mounts and the options that neutralise abuse.
+const HARDENED_MOUNTS: &[&str] = &["/dev/shm", "/tmp", "/var/tmp"];
+const WANT_OPTS: &[&str] = &["nosuid", "nodev", "noexec"];
+
+/// World-writable temp mounts (`/tmp`, `/var/tmp`, `/dev/shm`) should carry
+/// `nosuid`, `nodev` and `noexec` so an attacker can't drop and run a setuid
+/// binary or device node there. Only mounts that are actually present (a separate
+/// mount) are judged: a temp dir that isn't its own mount inherits `/`, and
+/// whether to make it a separate partition is a deployment choice this read-only
+/// check shouldn't assert.
+pub struct MountOptions;
+
+impl Check for MountOptions {
+    fn id(&self) -> &'static str {
+        "kernel-mount-options"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Kernel
+    }
+    fn title(&self) -> &'static str {
+        "Temp filesystem mount hardening"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Mount /tmp, /var/tmp and /dev/shm with nosuid,nodev,noexec (via /etc/fstab or a systemd tmp.mount) to block setuid escalation and code execution from world-writable dirs."
+    }
+    fn command(&self) -> &'static str {
+        "cat /proc/mounts"
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let mounts = parse_proc_mounts(output);
+        let mut problems: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for &mp in HARDENED_MOUNTS {
+            let Some(opts) = mounts.get(mp) else { continue };
+            checked += 1;
+            let missing: Vec<&str> = WANT_OPTS
+                .iter()
+                .copied()
+                .filter(|w| !opts.iter().any(|o| o == w))
+                .collect();
+            if !missing.is_empty() {
+                problems.push(format!("{mp} missing {}", missing.join(",")));
+            }
+        }
+        if checked == 0 {
+            return Outcome::pass(
+                "none of /tmp, /var/tmp, /dev/shm is a separate mount (inherits /).",
+            );
+        }
+        if problems.is_empty() {
+            Outcome::pass(format!(
+                "{checked} temp mount(s) carry nosuid,nodev,noexec."
+            ))
+        } else {
+            Outcome::fail(format!("{}.", problems.join("; ")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -249,6 +313,25 @@ mod tests {
                 .status,
             Status::Pass
         );
+    }
+
+    #[test]
+    fn mount_options() {
+        let base = "sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n";
+        // All three temp mounts fully hardened -> pass.
+        let hardened = format!(
+            "{base}tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec 0 0\n\
+             tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0\n\
+             tmpfs /var/tmp tmpfs rw,nosuid,nodev,noexec 0 0\n"
+        );
+        assert_eq!(MountOptions.evaluate(&hardened).status, Status::Pass);
+        // /dev/shm present but missing noexec (the systemd default) -> fail.
+        let default = format!("{base}tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n");
+        let m = MountOptions.evaluate(&default);
+        assert_eq!(m.status, Status::Fail);
+        assert!(m.detail.contains("/dev/shm missing noexec"), "{}", m.detail);
+        // None of the temp mounts is separate -> pass with a note (not a failure).
+        assert_eq!(MountOptions.evaluate(base).status, Status::Pass);
     }
 
     #[test]

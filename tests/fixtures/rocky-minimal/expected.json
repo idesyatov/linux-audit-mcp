@@ -29,6 +29,7 @@
     "kernel-kptr-restrict": "pass",
     "kernel-suid-dumpable": "fail",
     "kernel-unprivileged-bpf": "fail",
+    "kernel-mount-options": "fail",
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "pass",
     "updates-security-pending": "error",
@@ -40,7 +41,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 27,
-    "hardened": 2
+    "baseline": 24,
+    "hardened": 0
   }
 }

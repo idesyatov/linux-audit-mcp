@@ -149,6 +149,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(kernel::KptrRestrict),
         Box::new(kernel::SuidDumpable),
         Box::new(kernel::UnprivilegedBpf),
+        Box::new(kernel::MountOptions),
         // firewall
         Box::new(firewall::FirewallEnabled),
         Box::new(firewall::NftDefaultDeny), // privileged (sudo)

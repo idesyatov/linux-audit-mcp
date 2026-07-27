@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 36 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 37 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -520,7 +520,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-36 checks; each reads one read-only command and applies the tool/OpenSSH default
+37 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -555,6 +555,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | kernel    | `kernel-kptr-restrict`         | Low      | `kptr_restrict` not 1/2                     |
 | kernel    | `kernel-suid-dumpable`         | Medium   | `fs.suid_dumpable` ≠ 0                      |
 | kernel    | `kernel-unprivileged-bpf`      | Medium   | `unprivileged_bpf_disabled` not 1/2        |
+| kernel    | `kernel-mount-options`         | Medium   | `/tmp`, `/var/tmp` or `/dev/shm` (when separately mounted) lacks `nosuid`/`nodev`/`noexec` |
 | firewall  | `firewall-enabled`             | High     | no firewalld/ufw/nftables enabled          |
 | firewall  | `firewall-nft-default-deny` 🔑 | Medium   | live `nft` input hook accepts everything (defers if the host uses the iptables-legacy backend) |
 | updates   | `updates-security-pending`     | Medium   | pending security updates (apt)             |

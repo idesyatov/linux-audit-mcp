@@ -32,6 +32,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "cat /etc/login.defs",
     "getent passwd",
     "sysctl -a",
+    // Mounted filesystems + their options; read-only view of the kernel's mount
+    // table (checked for nosuid/nodev/noexec on sensitive tmpfs mounts).
+    "cat /proc/mounts",
     "ss -tuln",
     "systemctl list-unit-files --type=service --no-pager",
     // `-s` (simulate) performs no actions and needs no root - read-only.

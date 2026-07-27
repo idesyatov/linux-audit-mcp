@@ -136,6 +136,25 @@ pub fn parse_sysctl(output: &str) -> HashMap<String, String> {
     map
 }
 
+/// Parse `/proc/mounts` into a `mountpoint -> options` map. Each line is
+/// `device mountpoint fstype options dump pass`; the mount options are the 4th
+/// whitespace field, comma-separated (e.g. `rw,nosuid,nodev`). A later mount of
+/// the same path shadows an earlier one, so the LAST entry wins (matches the
+/// kernel's effective view). Paths with escaped spaces (`\040`) are rare on the
+/// dirs we check and left as-is.
+pub fn parse_proc_mounts(output: &str) -> HashMap<String, Vec<String>> {
+    let mut map = HashMap::new();
+    for line in output.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 {
+            continue;
+        }
+        let opts = f[3].split(',').map(|o| o.to_string()).collect();
+        map.insert(f[1].to_string(), opts);
+    }
+    map
+}
+
 /// Parse `systemctl list-unit-files` into a `unit -> state` map, e.g.
 /// `{"firewalld.service": "enabled"}`. The header and footer lines don't match
 /// the `unit state ...` shape and are skipped.
@@ -262,6 +281,21 @@ mod tests {
         let m = parse_keyword_map("# c\nPermitRootLogin no\nPermitRootLogin yes\nUMASK 027\n");
         assert_eq!(m.get("permitrootlogin").map(String::as_str), Some("no"));
         assert_eq!(m.get("umask").map(String::as_str), Some("027"));
+    }
+
+    #[test]
+    fn parses_proc_mounts() {
+        let out = "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n\
+                   tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n\
+                   tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0\n\
+                   garbage\n";
+        let m = parse_proc_mounts(out);
+        assert_eq!(
+            m.get("/dev/shm").unwrap(),
+            &vec!["rw".to_string(), "nosuid".to_string(), "nodev".to_string()]
+        );
+        assert!(m.get("/tmp").unwrap().contains(&"noexec".to_string()));
+        assert!(!m.contains_key("garbage")); // short line skipped
     }
 
     #[test]

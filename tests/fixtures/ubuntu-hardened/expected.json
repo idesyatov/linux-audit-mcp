@@ -28,6 +28,7 @@
     "kernel-kptr-restrict": "pass",
     "kernel-suid-dumpable": "pass",
     "kernel-unprivileged-bpf": "pass",
+    "kernel-mount-options": "pass",
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "skipped",
     "updates-security-pending": "pass",
