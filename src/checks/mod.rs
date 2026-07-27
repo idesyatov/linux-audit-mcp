@@ -42,6 +42,27 @@ pub enum Domain {
     Logging,
 }
 
+impl Domain {
+    /// The kebab-case domain names accepted by `--domain` (and used in output).
+    pub const NAMES: &'static [&'static str] = &[
+        "ssh", "accounts", "kernel", "firewall", "updates", "services", "logging",
+    ];
+
+    /// Parse a domain name (case-insensitive); `None` if unknown.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "ssh" => Some(Self::Ssh),
+            "accounts" => Some(Self::Accounts),
+            "kernel" => Some(Self::Kernel),
+            "firewall" => Some(Self::Firewall),
+            "updates" => Some(Self::Updates),
+            "services" => Some(Self::Services),
+            "logging" => Some(Self::Logging),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -114,6 +135,57 @@ pub trait Check: Send + Sync {
     fn effective_command(&self) -> Option<&'static str> {
         None
     }
+}
+
+/// Selects which checks an audit runs. Empty = every check. A positive selector
+/// (`only` ids or `domains`) restricts the run to matching checks; `skip` removes
+/// ids from whatever the selectors chose (skip always wins). Built from the CLI
+/// `--check`/`--domain`/`--skip` flags; [`Default`] (all checks) is what the MCP
+/// server and evals use.
+#[derive(Debug, Clone, Default)]
+pub struct CheckFilter {
+    /// Run only these exact check ids (`--check`).
+    pub only: Vec<String>,
+    /// Run only checks in these domains (`--domain`).
+    pub domains: Vec<Domain>,
+    /// Exclude these check ids (`--skip`).
+    pub skip: Vec<String>,
+}
+
+impl CheckFilter {
+    /// A positive selector is present, so unlisted checks are excluded.
+    fn has_positive(&self) -> bool {
+        !self.only.is_empty() || !self.domains.is_empty()
+    }
+
+    /// `true` if this check should run under the filter.
+    pub fn selects(&self, check: &dyn Check) -> bool {
+        if self.skip.iter().any(|s| s == check.id()) {
+            return false;
+        }
+        if !self.has_positive() {
+            return true;
+        }
+        self.only.iter().any(|o| o == check.id()) || self.domains.contains(&check.domain())
+    }
+
+    /// `true` if the filter narrows the run at all (any flag set).
+    pub fn is_active(&self) -> bool {
+        self.has_positive() || !self.skip.is_empty()
+    }
+}
+
+/// The checks an audit runs under `filter`, in registry order.
+pub fn selected_checks(filter: &CheckFilter) -> Vec<Box<dyn Check>> {
+    all_checks()
+        .into_iter()
+        .filter(|c| filter.selects(c.as_ref()))
+        .collect()
+}
+
+/// Every registered check's id (for validating `--check`/`--skip` against typos).
+pub fn all_check_ids() -> Vec<&'static str> {
+    all_checks().iter().map(|c| c.id()).collect()
 }
 
 /// Every check the auditor runs.
@@ -190,6 +262,45 @@ mod registry_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn filter_selects_expected_checks() {
+        use super::{selected_checks, CheckFilter, Domain};
+
+        // Empty filter -> every check.
+        let all = super::all_checks().len();
+        assert_eq!(selected_checks(&CheckFilter::default()).len(), all);
+        assert!(!CheckFilter::default().is_active());
+
+        // Only a domain -> just that domain's checks (all with the right domain).
+        let ssh_only = CheckFilter {
+            domains: vec![Domain::Ssh],
+            ..Default::default()
+        };
+        let ssh = selected_checks(&ssh_only);
+        assert!(!ssh.is_empty());
+        assert!(ssh.iter().all(|c| c.domain() == Domain::Ssh));
+
+        // An explicit id plus a domain -> the union.
+        let mixed = CheckFilter {
+            only: vec!["kernel-aslr".to_string()],
+            domains: vec![Domain::Ssh],
+            ..Default::default()
+        };
+        let sel = selected_checks(&mixed);
+        assert!(sel.iter().any(|c| c.id() == "kernel-aslr"));
+        assert!(sel.iter().any(|c| c.domain() == Domain::Ssh));
+
+        // Skip always wins, even over an explicit --check of the same id.
+        let skipped = CheckFilter {
+            only: vec!["kernel-aslr".to_string()],
+            skip: vec!["kernel-aslr".to_string()],
+            ..Default::default()
+        };
+        assert!(!selected_checks(&skipped)
+            .iter()
+            .any(|c| c.id() == "kernel-aslr"));
     }
 
     #[test]

@@ -308,10 +308,19 @@ docker run --rm \
 | `--target`     | Single target alias (this **or** `--group`).                        |
 | `--group`      | Group name — audits every member concurrently (or `all`).           |
 | `--profile`    | `baseline` \| `hardened` — overrides the target's profile.          |
+| `--check`      | Run only these check ids (repeatable or comma-separated).           |
+| `--domain`     | Run only these domains (ssh, accounts, kernel, firewall, updates, services, logging). |
+| `--skip`       | Skip these check ids (wins over `--check`).                         |
 | `--format`     | `text` (default) \| `json`.                                         |
 | `--config`     | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |
 | `--fail-on`    | Exit 2 if any failed check is ≥ this severity. `off` disables. Default `high`. |
 | `--fail-under` | Exit 2 if the total score is below this value (0–100).              |
+
+`--check`/`--domain` select a subset (union of the two); `--skip` removes ids from
+it. An unknown id or domain is an error (typo protection). When any of the three is
+set the run is **partial** — unselected domains contribute no deductions, so the
+score reflects only the checks that ran (a note is printed to stderr). Handy for
+re-checking one area after a change, e.g. `--domain ssh` or `--skip updates-security-pending`.
 
 For a group, exit code is the strongest signal across hosts: a tripped gate (2)
 dominates, else an unreachable host (1), else clean (0).

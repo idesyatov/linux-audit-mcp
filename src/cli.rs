@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
-use crate::checks::{Finding, Severity, Status};
+use crate::checks::{all_check_ids, CheckFilter, Domain, Finding, Severity, Status};
 use crate::config::{self, Config};
 use crate::health::{self, HealthStatus};
 use crate::history;
@@ -54,6 +54,20 @@ pub struct AuditArgs {
     /// Override the target's audit profile.
     #[arg(long)]
     profile: Option<String>,
+
+    /// Run only these check ids (repeatable or comma-separated). Combined with
+    /// `--domain` as a union; the score then reflects only the checks that ran.
+    #[arg(long = "check", value_name = "ID", value_delimiter = ',')]
+    checks: Vec<String>,
+
+    /// Run only checks in these domains (repeatable or comma-separated):
+    /// ssh, accounts, kernel, firewall, updates, services, logging.
+    #[arg(long = "domain", value_name = "NAME", value_delimiter = ',')]
+    domains: Vec<String>,
+
+    /// Skip these check ids (repeatable or comma-separated); wins over `--check`.
+    #[arg(long = "skip", value_name = "ID", value_delimiter = ',')]
+    skip: Vec<String>,
 
     /// Output format.
     #[arg(long, value_enum, default_value = "text")]
@@ -206,6 +220,44 @@ fn audit_exit(outcomes: &[AuditOutcome], fail_on: FailOn, fail_under: Option<u8>
     }
 }
 
+/// Build a [`CheckFilter`] from the CLI selectors, erroring on any unknown check
+/// id or domain name so a typo fails fast instead of silently selecting nothing.
+fn build_filter(
+    checks: &[String],
+    domains: &[String],
+    skip: &[String],
+) -> anyhow::Result<CheckFilter> {
+    let known = all_check_ids();
+    let validate_id = |id: &String| -> anyhow::Result<String> {
+        if known.contains(&id.as_str()) {
+            Ok(id.clone())
+        } else {
+            anyhow::bail!("unknown check id {id:?} (see the README check table for valid ids)")
+        }
+    };
+    let only = checks
+        .iter()
+        .map(validate_id)
+        .collect::<anyhow::Result<_>>()?;
+    let skip = skip
+        .iter()
+        .map(validate_id)
+        .collect::<anyhow::Result<_>>()?;
+    let domains = domains
+        .iter()
+        .map(|d| {
+            Domain::parse(d).ok_or_else(|| {
+                anyhow::anyhow!("unknown domain {d:?} (valid: {})", Domain::NAMES.join(", "))
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(CheckFilter {
+        only,
+        domains,
+        skip,
+    })
+}
+
 /// Run the audit against a target or group and print the report.
 pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
     let cfg = load_config(&args.config)?;
@@ -215,8 +267,16 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
         }
         None => None,
     };
+    let filter = build_filter(&args.checks, &args.domains, &args.skip)?;
+    if filter.is_active() {
+        // A partial run: unselected domains contribute no deductions, so the score
+        // reflects only the checks that ran. Note it on stderr so stdout/JSON stay clean.
+        eprintln!(
+            "note: filtered run - only selected checks ran; the score reflects only those checks"
+        );
+    }
     let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
-    let outcomes = run::audit_targets(&cfg, &aliases, profile_override).await?;
+    let outcomes = run::audit_targets(&cfg, &aliases, profile_override, &filter).await?;
 
     match &group {
         None => {
@@ -369,6 +429,51 @@ mod tests {
     fn no_subcommand_defaults_to_serve() {
         let cli = Cli::try_parse_from(["linux-audit-mcp"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn build_filter_validates_and_parses() {
+        // Valid ids + domain -> populated filter.
+        let f = build_filter(
+            &["kernel-aslr".to_string()],
+            &["ssh".to_string()],
+            &["ssh-max-auth-tries".to_string()],
+        )
+        .unwrap();
+        assert_eq!(f.only, vec!["kernel-aslr".to_string()]);
+        assert_eq!(f.domains, vec![Domain::Ssh]);
+        assert!(f.is_active());
+        // Empty selectors -> inactive (runs everything).
+        assert!(!build_filter(&[], &[], &[]).unwrap().is_active());
+        // Unknown check id and unknown domain both error (typo protection).
+        assert!(build_filter(&["nope-check".to_string()], &[], &[]).is_err());
+        assert!(build_filter(&[], &["nope-domain".to_string()], &[]).is_err());
+        assert!(build_filter(&[], &[], &["nope-skip".to_string()]).is_err());
+    }
+
+    #[test]
+    fn audit_parses_check_domain_skip() {
+        let a = Cli::try_parse_from([
+            "linux-audit-mcp",
+            "audit",
+            "--target",
+            "web",
+            "--check",
+            "kernel-aslr,ssh-weak-crypto",
+            "--domain",
+            "firewall",
+            "--skip",
+            "updates-security-pending",
+        ])
+        .unwrap();
+        match a.command {
+            Some(Command::Audit(a)) => {
+                assert_eq!(a.checks, vec!["kernel-aslr", "ssh-weak-crypto"]); // comma-split
+                assert_eq!(a.domains, vec!["firewall"]);
+                assert_eq!(a.skip, vec!["updates-security-pending"]);
+            }
+            _ => panic!("expected audit subcommand"),
+        }
     }
 
     #[test]

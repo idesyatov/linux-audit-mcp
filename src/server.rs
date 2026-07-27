@@ -14,7 +14,7 @@ use rmcp::{
 };
 
 use crate::scoring::Profile;
-use crate::{config, health, history, report, run};
+use crate::{checks, config, health, history, report, run};
 
 #[derive(Clone)]
 pub(crate) struct AuditServer {
@@ -108,9 +108,15 @@ impl AuditServer {
             None => None,
         };
         let (aliases, group) = select(&cfg, params.target, params.group)?;
-        let outcomes = run::audit_targets(&cfg, &aliases, profile_override)
-            .await
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        // The MCP tool always runs the full check set (no CLI-style filtering).
+        let outcomes = run::audit_targets(
+            &cfg,
+            &aliases,
+            profile_override,
+            &checks::CheckFilter::default(),
+        )
+        .await
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
         let (text, json) = match &group {
             None => {

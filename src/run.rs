@@ -11,7 +11,7 @@ use tokio::task::JoinSet;
 
 use crate::anomaly;
 use crate::audit;
-use crate::checks::Finding;
+use crate::checks::{CheckFilter, Finding};
 use crate::config::{Config, ConfigError};
 use crate::health::{self, HealthReport, HealthStatus};
 use crate::history;
@@ -35,6 +35,7 @@ pub async fn audit_targets(
     cfg: &Config,
     aliases: &[String],
     profile_override: Option<Profile>,
+    filter: &CheckFilter,
 ) -> Result<Vec<AuditOutcome>, ConfigError> {
     let mut jobs = Vec::with_capacity(aliases.len());
     for alias in aliases {
@@ -50,8 +51,9 @@ pub async fn audit_targets(
 
     let mut set = JoinSet::new();
     for (i, (alias, ssh, profile, privileged)) in jobs.into_iter().enumerate() {
+        let filter = filter.clone();
         set.spawn(async move {
-            let result = match audit::run_audit(&ssh, privileged).await {
+            let result = match audit::run_audit(&ssh, privileged, &filter).await {
                 Ok(findings) => {
                     let score = scoring::score(&findings, profile);
                     Ok((score, findings))

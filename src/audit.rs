@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::checks::{all_checks, Finding, Status};
+use crate::checks::{selected_checks, Check, CheckFilter, Finding, Status};
 use crate::ssh::{SshConfig, SshError};
 
 /// Command output collected once per distinct command: `Ok` stdout, or `Err`
@@ -18,8 +18,23 @@ pub type Outputs = HashMap<&'static str, Result<String, String>>;
 /// `sshd -T`) supersedes its normal command if it was collected successfully;
 /// otherwise the check falls back to its normal command, so the audit is robust
 /// when the sudo grant is missing.
+///
+/// The full-catalog convenience wrapper (used by the evals and unit tests); the
+/// run path uses [`evaluate_with`] over the [`CheckFilter`]-selected subset.
+#[cfg(test)]
 pub fn evaluate(outputs: &Outputs, privileged: bool) -> Vec<Finding> {
-    all_checks()
+    evaluate_with(&crate::checks::all_checks(), outputs, privileged)
+}
+
+/// Like [`evaluate`], but over an explicit check list (e.g. the subset selected
+/// by a [`CheckFilter`]). Only these checks produce findings, so a filtered-out
+/// check is simply absent rather than reported as skipped.
+pub fn evaluate_with(
+    checks: &[Box<dyn Check>],
+    outputs: &Outputs,
+    privileged: bool,
+) -> Vec<Finding> {
+    checks
         .iter()
         .map(|check| {
             // On an opted-in target, prefer the effective (privileged) source
@@ -71,10 +86,15 @@ pub fn evaluate(outputs: &Outputs, privileged: bool) -> Vec<Finding> {
 /// Host-level failures (auth, connection, timeout) abort the whole audit.
 /// A per-command remote failure (ssh connected but the command errored) is
 /// recorded as an `Error` finding for the checks that needed it; the rest run.
-pub async fn run_audit(ssh: &SshConfig, privileged: bool) -> Result<Vec<Finding>, SshError> {
-    // Snap each distinct command exactly once.
+pub async fn run_audit(
+    ssh: &SshConfig,
+    privileged: bool,
+    filter: &CheckFilter,
+) -> Result<Vec<Finding>, SshError> {
+    let checks = selected_checks(filter);
+    // Snap each distinct command exactly once, only for the selected checks.
     let mut outputs: Outputs = HashMap::new();
-    for check in &all_checks() {
+    for check in &checks {
         // Never send a privileged command to a target that didn't opt in.
         if !(check.privileged() && !privileged) {
             snap(ssh, &mut outputs, check.command()).await?;
@@ -88,7 +108,7 @@ pub async fn run_audit(ssh: &SshConfig, privileged: bool) -> Result<Vec<Finding>
         }
     }
 
-    Ok(evaluate(&outputs, privileged))
+    Ok(evaluate_with(&checks, &outputs, privileged))
 }
 
 /// Run `cmd` once (dedup by command) and record its output: `Ok` stdout, or an
