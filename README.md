@@ -636,6 +636,15 @@ container is intrinsically a problem, so the base snapshot flags it. `health-con
 probes both `docker` and `podman`; if neither is installed (or the audit user can't
 run the CLI without `sudo`) the metric is `n/a` and never gates.
 
+From the **second** snapshot onward these two signals also flag **between-run
+changes** versus the previous stored snapshot: a container whose uptime dropped
+(**restarted since last check** — caught even when the single snapshot lands mid-`Up`,
+which a live `Restarting` check would miss) and a systemd unit that **newly failed**.
+This is informational — like anomaly detection it never changes `overall` or the
+exit code — and appears as a `CHANGES since last check` section (and a `changes`
+array in JSON). Zero-config: it reuses the same `docker ps -a` / failed-units output
+already read, so no extra command and no per-host setup.
+
 Hot processes come from `ps -eo pid,comm,pcpu,pmem`. Two metrics need a timed
 sample: `vmstat 1 2` takes a one-second CPU sample for I/O-wait, and network
 throughput samples the interface counters **twice** (`net_sample_secs` apart, ~1s)

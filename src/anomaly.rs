@@ -178,6 +178,9 @@ mod tests {
             overall: HealthStatus::Ok,
             anomalies: Vec::new(),
             anomaly_note: None,
+            changes: Vec::new(),
+            container_uptimes: BTreeMap::new(),
+            failed_units: Vec::new(),
         }
     }
 
@@ -193,6 +196,8 @@ mod tests {
                     ts: i as u64,
                     overall: HealthStatus::Ok,
                     metrics: m,
+                    containers: BTreeMap::new(),
+                    failed_units: Vec::new(),
                 }
             })
             .collect()

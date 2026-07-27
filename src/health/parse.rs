@@ -74,6 +74,62 @@ pub fn parse_container_problems(output: &str) -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// Uptime in whole seconds for the running containers in `docker ps -a` /
+/// `podman ps -a` output: `(name, uptime_secs)` for every `Up` container. The
+/// value is coarse - docker humanizes the STATUS (`Up 2 days`, `Up About an
+/// hour`, `Up 40 seconds`) - but a restart resets it to a small value, so a drop
+/// versus the previous snapshot reveals a restart (see
+/// [`crate::run::annotate_changes`]). Non-running containers (Exited/Restarting/
+/// Created) have no stable uptime and are skipped.
+pub fn parse_container_uptimes(output: &str) -> Vec<(String, u64)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with("CONTAINER ID") {
+                return None;
+            }
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let up_idx = tokens.iter().position(|t| *t == "Up")?;
+            let secs = parse_up_duration(&tokens[up_idx + 1..])?;
+            let name = tokens.last()?;
+            Some((name.to_string(), secs))
+        })
+        .collect()
+}
+
+/// Parse the humanized duration that follows `Up` in a container STATUS into
+/// seconds. Handles `2 days`, `a/an <unit>`, `About a/an <unit>`, and `Less than
+/// a second`. Units are approximate (month = 30d, year = 365d) - only the trend
+/// between snapshots matters. Unknown shapes yield `None`.
+fn parse_up_duration(rest: &[&str]) -> Option<u64> {
+    // "Less than a second"
+    if rest.first() == Some(&"Less") {
+        return Some(0);
+    }
+    // "About an hour" / "About a minute" -> the quantity is one.
+    let (qty, unit) = if rest.first() == Some(&"About") {
+        (1u64, *rest.get(2)?)
+    } else {
+        let qty = match *rest.first()? {
+            "a" | "an" => 1,
+            n => n.parse().ok()?,
+        };
+        (qty, *rest.get(1)?)
+    };
+    let per = match unit.trim_end_matches('s') {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        "week" => 604_800,
+        "month" => 2_592_000,
+        "year" => 31_536_000,
+        _ => return None,
+    };
+    Some(qty * per)
+}
+
 /// Memory and swap totals in bytes, from `free -b`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemInfo {
@@ -385,6 +441,30 @@ mod tests {
         )
         .is_empty());
         assert!(parse_container_problems("").is_empty());
+    }
+
+    #[test]
+    fn container_uptimes() {
+        let out = "CONTAINER ID   IMAGE          COMMAND   CREATED       STATUS                       PORTS   NAMES\n\
+                   a1b2c3d4e5f6   nginx:latest   \"...\"     2 days ago    Up 2 days                    80/tcp  web\n\
+                   b2c3d4e5f6a7   redis:7        \"...\"     2 hours ago   Up About an hour (healthy)   6379/tcp cache\n\
+                   c3d4e5f6a7b8   busy:16        \"...\"     1 min ago     Up 40 seconds                5432/tcp fresh\n\
+                   d4e5f6a7b8c9   proxy:latest   \"...\"     3 months ago  Restarting (2) 5 seconds ago 443/tcp mtproxy\n\
+                   e5f6a7b8c9d0   old:latest     \"...\"     1 week ago    Exited (0) 3 days ago                stopped\n";
+        let up = parse_container_uptimes(out);
+        assert_eq!(
+            up,
+            vec![
+                ("web".to_string(), 172_800), // 2 days
+                ("cache".to_string(), 3_600), // About an hour
+                ("fresh".to_string(), 40),    // 40 seconds
+            ]
+        );
+        // Restarting/Exited/Created have no stable uptime and are skipped.
+        assert!(!up.iter().any(|(n, _)| n == "mtproxy" || n == "stopped"));
+        // "Less than a second" -> 0, still tracked so a later restart is a drop.
+        let sub = "CONTAINER ID x\nx img c cr Up Less than a second p tiny\n";
+        assert_eq!(parse_container_uptimes(sub), vec![("tiny".to_string(), 0)]);
     }
 
     #[test]

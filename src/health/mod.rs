@@ -11,7 +11,7 @@
 pub mod parse;
 pub mod report;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -159,6 +159,21 @@ pub struct HealthReport {
     /// transparency hint so an empty `anomalies` is never ambiguous.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anomaly_note: Option<String>,
+    /// Between-run changes versus this host's previous snapshot: a container that
+    /// restarted (its uptime dropped) or a systemd unit that newly failed. Filled
+    /// in after collection by [`crate::run::annotate_changes`]. Informational -
+    /// like anomalies, it never changes `overall` nor the exit code.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+    /// Running containers -> coarse uptime (seconds), carried to the stored
+    /// history so the next run can spot a restart (uptime dropping). Internal
+    /// state, not part of the wire report.
+    #[serde(skip)]
+    pub container_uptimes: BTreeMap<String, u64>,
+    /// Currently-failed systemd units, carried to history so the next run can
+    /// flag a unit that newly failed. Internal state, not part of the wire report.
+    #[serde(skip)]
+    pub failed_units: Vec<String>,
 }
 
 /// Thresholds for turning raw readings into `Ok`/`Warn`/`Crit`. Each field has a
@@ -693,15 +708,33 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
 
     let overall = worst(&metrics);
 
+    // Carried to history so the next run can detect between-run changes (a
+    // restarted container, a newly-failed unit); the detection itself needs the
+    // stored history and runs in the orchestration layer.
+    let failed_units = out(outputs, SYSTEMCTL_FAILED)
+        .map(parse::parse_failed_units)
+        .unwrap_or_default();
+    let mut container_uptimes = BTreeMap::new();
+    for text in [out(outputs, DOCKER_PS), out(outputs, PODMAN_PS)]
+        .into_iter()
+        .flatten()
+    {
+        container_uptimes.extend(parse::parse_container_uptimes(text));
+    }
+
     HealthReport {
         metrics,
         top_cpu,
         top_mem,
         overall,
-        // Anomalies need the stored history + per-target config, neither of which
-        // this pure function has; they are filled in by the run orchestration.
+        // Anomalies and between-run changes need the stored history + per-target
+        // config, neither of which this pure function has; they are filled in by
+        // the run orchestration.
         anomalies: Vec::new(),
         anomaly_note: None,
+        changes: Vec::new(),
+        container_uptimes,
+        failed_units,
     }
 }
 

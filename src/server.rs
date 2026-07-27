@@ -161,6 +161,9 @@ impl AuditServer {
 
         // Detect anomalies against stored history BEFORE recording this run.
         run::annotate_anomalies(&cfg, &mut outcomes);
+        // Flag between-run changes (a container restarted, a unit newly failed)
+        // vs the previous snapshot - also before recording.
+        run::annotate_changes(&mut outcomes);
         // Persist each successful snapshot so the recurring "pulse" builds up
         // per-host history for later baselining. Best-effort (errors are logged).
         history::record_outcomes(&outcomes, true);

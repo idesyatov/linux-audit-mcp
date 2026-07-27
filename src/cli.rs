@@ -275,6 +275,9 @@ pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
     // Detect anomalies against stored history BEFORE recording this run, so the
     // fresh reading is never part of its own baseline.
     run::annotate_anomalies(&cfg, &mut outcomes);
+    // Flag between-run changes (a container restarted, a unit newly failed) vs
+    // the previous snapshot - also before recording, so "previous" is the prior run.
+    run::annotate_changes(&mut outcomes);
     // Persist each successful snapshot for later trend inspection / baselining.
     // Best-effort: a storage error is logged, never fails the health run.
     history::record_outcomes(&outcomes, !args.no_store);

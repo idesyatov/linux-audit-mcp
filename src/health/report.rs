@@ -73,6 +73,19 @@ pub fn text(target: &str, report: &HealthReport) -> String {
         let _ = writeln!(out, "  (anomaly: {note})");
     }
 
+    // Between-run changes (a container restarted, a unit newly failed) -
+    // informational, like anomalies; never gates the overall status.
+    if !report.changes.is_empty() {
+        let _ = writeln!(
+            out,
+            "  CHANGES since last check ({}), informational:",
+            report.changes.len()
+        );
+        for c in &report.changes {
+            let _ = writeln!(out, "    {c}");
+        }
+    }
+
     let _ = writeln!(out, "  top CPU:");
     for p in &report.top_cpu {
         let _ = writeln!(out, "    {:>7.1}%  {} (pid {})", p.cpu, p.comm, p.pid);
@@ -157,6 +170,16 @@ mod tests {
         r.anomaly_note = Some("baseline warming up (3/8)".to_string());
         let out = text("web", &r);
         assert!(out.contains("baseline warming up (3/8)"));
+    }
+
+    #[test]
+    fn text_renders_changes_section() {
+        let mut r = sample();
+        r.changes
+            .push("container mtproxy restarted since last check (up 40s, was up 2d)".to_string());
+        let out = text("web", &r);
+        assert!(out.contains("CHANGES since last check (1)"));
+        assert!(out.contains("mtproxy restarted"));
     }
 
     #[test]

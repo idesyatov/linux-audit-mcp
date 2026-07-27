@@ -33,6 +33,14 @@ pub struct Snapshot {
     pub overall: HealthStatus,
     #[serde(default)]
     pub metrics: BTreeMap<String, f64>,
+    /// Running containers -> uptime seconds at snapshot time; lets the next run
+    /// detect a restart (uptime dropping). Absent in pre-0.16 snapshots -> empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub containers: BTreeMap<String, u64>,
+    /// Systemd units in the failed state at snapshot time; lets the next run flag
+    /// a unit that newly failed. Absent in pre-0.16 snapshots -> empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_units: Vec<String>,
 }
 
 impl Snapshot {
@@ -48,6 +56,8 @@ impl Snapshot {
             ts,
             overall: report.overall,
             metrics,
+            containers: report.container_uptimes.clone(),
+            failed_units: report.failed_units.clone(),
         }
     }
 }
@@ -308,6 +318,8 @@ mod tests {
             ts,
             overall: HealthStatus::Ok,
             metrics,
+            containers: BTreeMap::new(),
+            failed_units: Vec::new(),
         }
     }
 
@@ -372,6 +384,35 @@ mod tests {
         record_in(d.path(), "web", &snap(2, 0.0), 0).unwrap();
         let got = read_recent_in(d.path(), "web", 10).unwrap();
         assert_eq!(got.len(), 2); // the junk line is skipped, the two snapshots survive
+    }
+
+    #[test]
+    fn round_trips_containers_and_failed_units() {
+        let d = TempDir::new();
+        let mut s = snap(1, 0.5);
+        s.containers.insert("mtproxy".to_string(), 172_800);
+        s.failed_units.push("nginx.service".to_string());
+        record_in(d.path(), "web", &s, 0).unwrap();
+        let got = read_recent_in(d.path(), "web", 10).unwrap();
+        assert_eq!(got[0].containers.get("mtproxy"), Some(&172_800));
+        assert_eq!(got[0].failed_units, vec!["nginx.service".to_string()]);
+    }
+
+    #[test]
+    fn pre_0_16_snapshot_without_new_fields_defaults_empty() {
+        let d = TempDir::new();
+        let path = file_in(d.path(), "web").unwrap();
+        fs::create_dir_all(d.path()).unwrap();
+        // A snapshot line from before the containers/failed_units fields existed.
+        fs::write(
+            &path,
+            "{\"ts\":1,\"overall\":\"ok\",\"metrics\":{\"health-load\":0.5}}\n",
+        )
+        .unwrap();
+        let got = read_recent_in(d.path(), "web", 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].containers.is_empty());
+        assert!(got[0].failed_units.is_empty());
     }
 
     #[test]

@@ -15,8 +15,11 @@ hardening fact, so it produces no 0–100 score and never touches `scoring.rs`.
 
 Each snapshot is also **recorded** (append-only JSONL per target, `history.rs`)
 and compared against the host's own recent norm to surface **anomalies**
-(`anomaly.rs`: robust median + MAD baseline). Anomalies are informational too —
-they never affect the health status, the exit code, or the security score.
+(`anomaly.rs`: robust median + MAD baseline). The previous snapshot also drives
+**between-run change** detection (`run::annotate_changes`): a container whose
+uptime dropped (restarted since last check) or a unit that newly failed. Both
+anomalies and changes are informational — they never affect the health status,
+the exit code, or the security score.
 
 ## Components & data flow
 

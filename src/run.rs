@@ -121,6 +121,64 @@ pub fn annotate_anomalies(cfg: &Config, outcomes: &mut [HealthOutcome]) {
     }
 }
 
+/// Flag between-run changes for each successful outcome by comparing the fresh
+/// reading against this host's most recent stored snapshot: a container whose
+/// uptime dropped (restarted since the last check) or a systemd unit that newly
+/// entered the failed state. Must run BEFORE the new snapshot is recorded, so
+/// "previous" is genuinely the prior run.
+///
+/// Informational only - like anomalies, these never change `overall` nor the
+/// exit code. Best-effort: no history yet (first run) or a read error leaves
+/// `changes` empty and never fails the run. Zero-config: unlike anomalies this
+/// needs only one prior snapshot, so it works from the second run onward.
+pub fn annotate_changes(outcomes: &mut [HealthOutcome]) {
+    for o in outcomes.iter_mut() {
+        let Ok(report) = &mut o.result else { continue };
+        let prev = match history::read_recent(&o.alias, 1) {
+            Ok(mut v) => v.pop(),
+            Err(e) => {
+                tracing::warn!("changes: could not read history for '{}': {e}", o.alias);
+                continue;
+            }
+        };
+        let Some(prev) = prev else { continue };
+        let mut changes = Vec::new();
+        // A container restarted iff its uptime dropped versus last check. Uptime
+        // is monotonic within a container's life, so a drop is unambiguous - no
+        // false positives from the coarse humanized value.
+        for (name, &up) in &report.container_uptimes {
+            if let Some(&prev_up) = prev.containers.get(name) {
+                if up < prev_up {
+                    changes.push(format!(
+                        "container {name} restarted since last check (up {}, was up {})",
+                        fmt_dur(up),
+                        fmt_dur(prev_up)
+                    ));
+                }
+            }
+        }
+        // A unit newly failed iff it is failed now but was not last check.
+        for u in &report.failed_units {
+            if !prev.failed_units.contains(u) {
+                changes.push(format!("unit {u} newly failed since last check"));
+            }
+        }
+        changes.sort();
+        report.changes = changes;
+    }
+}
+
+/// Compact human duration for whole seconds (`90` -> `1m`, `172800` -> `2d`).
+/// Coarse on purpose: it only annotates a restart note.
+fn fmt_dur(secs: u64) -> String {
+    for (size, suffix) in [(86_400, 'd'), (3_600, 'h'), (60, 'm')] {
+        if secs >= size {
+            return format!("{}{suffix}", secs / size);
+        }
+    }
+    format!("{secs}s")
+}
+
 /// Drain a `JoinSet<(index, T)>` and return the `T`s in ascending index order.
 async fn collect_ordered<T: Send + 'static>(mut set: JoinSet<(usize, T)>) -> Vec<T> {
     let mut buf: Vec<(usize, T)> = Vec::new();
@@ -240,9 +298,13 @@ mod tests {
     use crate::history::{record_in, Snapshot};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
-    // Only this test touches $LINUX_AUDIT_DATA_DIR (history tests use explicit
-    // dirs), so setting it process-wide here does not race other tests.
+    // $LINUX_AUDIT_DATA_DIR is process-global; the tests that set it must not run
+    // concurrently, so they serialize on this lock (history tests use explicit
+    // dirs and don't need it).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn temp_dir(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("lah-run-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
@@ -265,6 +327,9 @@ mod tests {
             overall: HealthStatus::Ok,
             anomalies: vec![],
             anomaly_note: None,
+            changes: vec![],
+            container_uptimes: BTreeMap::new(),
+            failed_units: vec![],
         }
     }
 
@@ -275,6 +340,8 @@ mod tests {
             ts,
             overall: HealthStatus::Ok,
             metrics: m,
+            containers: BTreeMap::new(),
+            failed_units: Vec::new(),
         }
     }
 
@@ -287,6 +354,7 @@ mod tests {
 
     #[test]
     fn annotate_warms_up_then_flags_spike() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = temp_dir("anom");
         std::env::set_var("LINUX_AUDIT_DATA_DIR", &dir);
         let cfg: Config = toml::from_str("[targets.web]\nhost = \"1.1.1.1\"").unwrap();
@@ -311,6 +379,69 @@ mod tests {
         assert_eq!(r.anomalies.len(), 1);
         assert_eq!(r.anomalies[0].metric_id, "health-load");
         assert!(r.anomaly_note.is_none());
+
+        std::env::remove_var("LINUX_AUDIT_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A snapshot carrying container uptimes and failed units, for the changes test.
+    fn snap_state(ts: u64, containers: &[(&str, u64)], failed: &[&str]) -> Snapshot {
+        Snapshot {
+            ts,
+            overall: HealthStatus::Ok,
+            metrics: BTreeMap::new(),
+            containers: containers
+                .iter()
+                .map(|(n, u)| (n.to_string(), *u))
+                .collect(),
+            failed_units: failed.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn state_report(containers: &[(&str, u64)], failed: &[&str]) -> Vec<HealthOutcome> {
+        let mut r = load_report(0.3);
+        r.container_uptimes = containers
+            .iter()
+            .map(|(n, u)| (n.to_string(), *u))
+            .collect();
+        r.failed_units = failed.iter().map(|s| s.to_string()).collect();
+        vec![HealthOutcome {
+            alias: "web".to_string(),
+            result: Ok(r),
+        }]
+    }
+
+    #[test]
+    fn annotate_changes_flags_restart_and_new_failure() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("changes");
+        std::env::set_var("LINUX_AUDIT_DATA_DIR", &dir);
+
+        // No history yet -> nothing flagged (first run is silent).
+        let mut first = state_report(&[("mtproxy", 40)], &[]);
+        annotate_changes(&mut first);
+        assert!(first[0].result.as_ref().unwrap().changes.is_empty());
+
+        // Previous run: mtproxy up 2 days, web up 1 hour, no failed units.
+        record_in(
+            &dir,
+            "web",
+            &snap_state(1, &[("mtproxy", 172_800), ("web", 3_600)], &[]),
+            0,
+        )
+        .unwrap();
+
+        // Now: mtproxy uptime dropped (restarted), web grew (fine), nginx failed.
+        let mut cur = state_report(&[("mtproxy", 40), ("web", 7_200)], &["nginx.service"]);
+        annotate_changes(&mut cur);
+        let changes = &cur[0].result.as_ref().unwrap().changes;
+        assert_eq!(changes.len(), 2, "{changes:?}");
+        assert!(changes.iter().any(|c| c.contains("mtproxy restarted")));
+        assert!(changes
+            .iter()
+            .any(|c| c.contains("nginx.service newly failed")));
+        // web's uptime grew, so it is not reported as restarted.
+        assert!(!changes.iter().any(|c| c.contains("web restarted")));
 
         std::env::remove_var("LINUX_AUDIT_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
