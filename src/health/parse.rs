@@ -338,6 +338,40 @@ pub fn parse_netstat_listen(output: &str) -> Option<(u64, u64)> {
     None
 }
 
+/// Parse `/proc/net/stat/nf_conntrack` into cumulative `(drop, early_drop,
+/// insert_failed)` summed across CPUs. The first line is the column names, then
+/// one hex-value line per CPU in the same order; columns are found by name (like
+/// [`parse_netstat_listen`]) so kernel-version shifts don't matter, and values
+/// are hex. `None` if none of the three drop-related columns exist or there are
+/// no data rows. A missing column contributes 0 (older kernels lack some).
+pub fn parse_conntrack_drops(output: &str) -> Option<(u64, u64, u64)> {
+    let mut lines = output.lines();
+    let header: Vec<&str> = lines.next()?.split_whitespace().collect();
+    let idx = |name: &str| header.iter().position(|c| *c == name);
+    let (di, ei, ii) = (idx("drop"), idx("early_drop"), idx("insert_failed"));
+    if di.is_none() && ei.is_none() && ii.is_none() {
+        return None;
+    }
+    let (mut drop, mut early, mut insf) = (0u64, 0u64, 0u64);
+    let mut rows = 0usize;
+    for line in lines {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.is_empty() {
+            continue;
+        }
+        rows += 1;
+        let get = |i: Option<usize>| {
+            i.and_then(|i| f.get(i))
+                .and_then(|v| u64::from_str_radix(v, 16).ok())
+                .unwrap_or(0)
+        };
+        drop += get(di);
+        early += get(ei);
+        insf += get(ii);
+    }
+    (rows > 0).then_some((drop, early, insf))
+}
+
 /// One process row from `ps -eo pid,comm,pcpu,pmem`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProcInfo {
@@ -690,6 +724,23 @@ mod tests {
         assert_eq!(parse_netstat_listen(out), Some((12, 34)));
         // No TcpExt value line -> None.
         assert_eq!(parse_netstat_listen("IpExt: A B\nIpExt: 1 2\n"), None);
+    }
+
+    #[test]
+    fn conntrack_drops_sums_hex_across_cpus() {
+        // Header + two CPU rows; values are hex. drop=0x0a+0x00=10,
+        // early_drop=0x02+0x03=5, insert_failed=0x01+0x00=1.
+        let out = "entries searched found new invalid ignore delete delete_list insert insert_failed drop early_drop\n\
+                   0000004a 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001 0000000a 00000002\n\
+                   0000004a 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000003\n";
+        assert_eq!(parse_conntrack_drops(out), Some((10, 5, 1)));
+        // No drop-related columns -> None.
+        assert_eq!(
+            parse_conntrack_drops("entries found\n00000001 00000002\n"),
+            None
+        );
+        // Header only, no data rows -> None.
+        assert_eq!(parse_conntrack_drops("entries drop early_drop\n"), None);
     }
 
     #[test]

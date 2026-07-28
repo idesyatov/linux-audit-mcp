@@ -77,6 +77,11 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // TCP extended counters; sampled twice for the accept-queue overflow rate
     // (ListenOverflows/ListenDrops) - the server failing to accept connections.
     "cat /proc/net/netstat",
+    // Netfilter conntrack per-CPU stat counters (drop/early_drop/insert_failed);
+    // sampled twice for the connection-drop rate. `early_drop` rising means the
+    // table was full enough to evict entries - the NAT/firewall/proxy dropping
+    // connections. Unprivileged, read-only.
+    "cat /proc/net/stat/nf_conntrack",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",

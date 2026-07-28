@@ -70,6 +70,10 @@ const NETDEV: &str = "cat /proc/net/dev";
 /// TCP extended counters; sampled twice (alongside [`NETDEV`]) for the
 /// accept-queue overflow rate. Handled in [`collect`], not [`evaluate`].
 const NETSTAT: &str = "cat /proc/net/netstat";
+/// Netfilter conntrack per-CPU stat counters; sampled twice (alongside
+/// [`NETDEV`]) for the connection-drop rate. Handled in [`collect`], not
+/// [`evaluate`]. Unprivileged.
+const CONNTRACK_STAT: &str = "cat /proc/net/stat/nf_conntrack";
 
 /// Commands snapped exactly once per snapshot.
 const SINGLE_SHOT: &[&str] = &[
@@ -118,6 +122,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     SUDO_PODMAN_PS,
     NETDEV,
     NETSTAT,
+    CONNTRACK_STAT,
 ];
 
 /// The wire command for a container probe: on a `privileged` target the `sudo -n`
@@ -291,6 +296,11 @@ pub struct Thresholds {
     /// listen backlog is overflowing and connections are being dropped.
     pub listen_overflow_warn_pps: f64,
     pub listen_overflow_crit_pps: f64,
+    /// Conntrack connection-drop rate (events/s) over the sample window
+    /// (`health-conntrack-drops`). A healthy host holds this at 0; a sustained
+    /// rate means the conntrack table is full and dropping connections.
+    pub conntrack_drop_warn_pps: f64,
+    pub conntrack_drop_crit_pps: f64,
     /// Gap between the two `/proc/net/dev` samples, in seconds.
     pub net_sample_secs: u64,
     /// Failed systemd services: any failed unit is a `Warn`; this many or more
@@ -334,6 +344,8 @@ impl Default for Thresholds {
             net_err_crit_pps: 10.0,
             listen_overflow_warn_pps: 1.0,
             listen_overflow_crit_pps: 10.0,
+            conntrack_drop_warn_pps: 1.0,
+            conntrack_drop_crit_pps: 10.0,
             net_sample_secs: 1,
             failed_units_crit: 0,
             zombie_crit: 0,
@@ -1040,6 +1052,56 @@ fn net_listen_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metr
     }
 }
 
+/// Rate of conntrack table-pressure events over the sample window, from
+/// `/proc/net/stat/nf_conntrack`. When the table fills, the kernel evicts entries
+/// early (`early_drop`) and fails to insert new ones (`insert_failed`) - a
+/// NAT/firewall/proxy dropping connections that the count-vs-max gauge only warns
+/// is *near* full. The rate gates on `early_drop + insert_failed`; the generic
+/// `drop` counter ticks routinely on high-churn hosts even when the table is far
+/// from full (seen on the mtproto proxies), so it's shown as context but never
+/// gates. A healthy host holds the gated rate at 0; the since-boot totals answer
+/// "were there drops already this boot?". Missing/unparseable stat (or module not
+/// loaded) reports `Unknown`.
+fn net_conntrack_drops_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-conntrack-drops";
+    const TITLE: &str = "Conntrack drops";
+    if dt_secs <= 0.0 {
+        return unknown(ID, TITLE, "no measurable interval between samples");
+    }
+    let (Some((_d1, e1, i1)), Some((d2, e2, i2))) = (
+        parse::parse_conntrack_drops(s1),
+        parse::parse_conntrack_drops(s2),
+    ) else {
+        return unknown(
+            ID,
+            TITLE,
+            "nf_conntrack stats unavailable (module not loaded?)",
+        );
+    };
+    // Gate on table-pressure events only; the generic `drop` is noisy on busy hosts.
+    let pressure1 = e1 + i1;
+    let pressure2 = e2 + i2;
+    // saturating: a counter reset (reboot) yields 0 rather than a spike.
+    let rate = pressure2.saturating_sub(pressure1) as f64 / dt_secs;
+    let since_boot = format!("since boot: early_drop {e2}, insert_failed {i2}, drop {d2}");
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(
+            rate,
+            thr.conntrack_drop_warn_pps,
+            thr.conntrack_drop_crit_pps,
+        ),
+        value: if rate > 0.0 {
+            format!("{rate:.1} conn-drop/s ({since_boot})")
+        } else {
+            format!("no conntrack table pressure ({since_boot})")
+        },
+        detail: format!("over {dt_secs:.1}s; {since_boot}"),
+        numeric: Some(rate),
+    }
+}
+
 /// Worst status across metrics (`Unknown` is neutral; `Unknown` overall only if
 /// nothing could be measured).
 fn worst(metrics: &[Metric]) -> HealthStatus {
@@ -1162,11 +1224,12 @@ pub async fn collect(
     // Two timed samples of the counter files -> throughput, error and accept-queue
     // overflow rates. A remote error on the `dev` reads degrades to Unknown metrics;
     // host-level errors abort.
-    let (throughput, errors, listen) = match sample_net(ssh, thr).await? {
+    let (throughput, errors, listen, conntrack_drops) = match sample_net(ssh, thr).await? {
         Some(s) => (
             net_throughput_metric(&s.dev1, &s.dev2, s.dt, thr),
             net_errors_metric(&s.dev1, &s.dev2, s.dt, thr),
             net_listen_metric(&s.stat1, &s.stat2, s.dt, thr),
+            net_conntrack_drops_metric(&s.ct1, &s.ct2, s.dt, thr),
         ),
         None => (
             unknown(
@@ -1184,11 +1247,17 @@ pub async fn collect(
                 "TCP accept-queue overflows",
                 "/proc/net/dev unavailable",
             ),
+            unknown(
+                "health-conntrack-drops",
+                "Conntrack drops",
+                "/proc/net/dev unavailable",
+            ),
         ),
     };
     report.metrics.push(throughput);
     report.metrics.push(errors);
     report.metrics.push(listen);
+    report.metrics.push(conntrack_drops);
     report.overall = worst(&report.metrics);
     Ok(report)
 }
@@ -1212,6 +1281,10 @@ struct NetSamples {
     /// (the throughput/error metrics need only the `dev` pair).
     stat1: String,
     stat2: String,
+    /// `/proc/net/stat/nf_conntrack` at each point; empty if that read failed
+    /// remotely (the conntrack-drops metric then reports `Unknown`).
+    ct1: String,
+    ct2: String,
     dt: f64,
 }
 
@@ -1225,6 +1298,7 @@ async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSampl
         Err(host_level) => return Err(host_level),
     };
     let stat1 = run_single(ssh, NETSTAT).await?.unwrap_or_default();
+    let ct1 = run_single(ssh, CONNTRACK_STAT).await?.unwrap_or_default();
     let start = std::time::Instant::now();
     tokio::time::sleep(std::time::Duration::from_secs(thr.net_sample_secs.max(1))).await;
     let dev2 = match ssh.run(NETDEV).await {
@@ -1233,11 +1307,14 @@ async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSampl
         Err(host_level) => return Err(host_level),
     };
     let stat2 = run_single(ssh, NETSTAT).await?.unwrap_or_default();
+    let ct2 = run_single(ssh, CONNTRACK_STAT).await?.unwrap_or_default();
     Ok(Some(NetSamples {
         dev1,
         dev2,
         stat1,
         stat2,
+        ct1,
+        ct2,
         dt: start.elapsed().as_secs_f64(),
     }))
 }
@@ -1348,6 +1425,42 @@ mod tests {
         // Missing netstat -> Unknown (never gates).
         assert_eq!(
             net_listen_metric("", "", 1.0, &thr).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn net_conntrack_drops_flags_table_pressure_not_generic_drop() {
+        let thr = Thresholds::default(); // warn 1/s, crit 10/s
+        let hdr = "entries found drop early_drop insert_failed\n";
+        // Gate = early_drop + insert_failed. s1: e=2,i=1 -> 3; s2: e=9,i=4 -> 13.
+        let s1 = format!("{hdr}00000064 00000000 0000000a 00000002 00000001\n");
+        // +10 pressure over 1s -> 10/s -> Crit. (drop also jumps but is ignored.)
+        let s2 = format!("{hdr}00000064 00000000 00000064 00000009 00000004\n");
+        let m = net_conntrack_drops_metric(&s1, &s2, 1.0, &thr);
+        assert_eq!(m.status, HealthStatus::Crit);
+        assert_eq!(m.numeric, Some(10.0));
+
+        // A big generic `drop` delta with NO early_drop/insert_failed change ->
+        // Ok (the noisy-drop case that WARN'd mt3 in live-verify).
+        let noisy = format!("{hdr}00000064 00000000 00010000 00000002 00000001\n");
+        let nm = net_conntrack_drops_metric(&s1, &noisy, 1.0, &thr);
+        assert_eq!(nm.status, HealthStatus::Ok);
+        assert!(
+            nm.value.contains("no conntrack table pressure"),
+            "{}",
+            nm.value
+        );
+        assert!(nm.value.contains("early_drop 2"), "{}", nm.value);
+
+        // Counter reset (second lower) -> 0, not a spike.
+        assert_eq!(
+            net_conntrack_drops_metric(&s2, &s1, 1.0, &thr).status,
+            HealthStatus::Ok
+        );
+        // Module not loaded / unparseable -> Unknown (never gates).
+        assert_eq!(
+            net_conntrack_drops_metric("", "", 1.0, &thr).status,
             HealthStatus::Unknown
         );
     }

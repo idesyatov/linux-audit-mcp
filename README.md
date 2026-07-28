@@ -270,7 +270,9 @@ net_err_warn_pps = 1.0    # per-interface error rate (pkts/s); errors on a healt
 net_err_crit_pps = 10.0
 listen_overflow_warn_pps = 1.0   # TCP accept-queue overflow rate (events/s); healthy = 0 (health-listen-overflows)
 listen_overflow_crit_pps = 10.0
-net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat samples
+conntrack_drop_warn_pps = 1.0    # conntrack early_drop+insert_failed rate (events/s); healthy = 0 (health-conntrack-drops)
+conntrack_drop_crit_pps = 10.0
+net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat + nf_conntrack samples
 failed_units_crit = 0     # failed systemd services: any → Warn; ≥ this count → Crit (0 = never Crit)
 top_n = 5                 # hot processes listed per resource
 ```
@@ -678,6 +680,7 @@ reported `UNKNOWN` and never gates.
 | `health-inodes`       | `df -Pi`                                   | worst filesystem inode % ≥ disk threshold (free space but no free inodes → can't create files) |
 | `health-fd`           | `cat /proc/sys/fs/file-nr`                 | open file descriptors ≥ `fd_warn_pct`/`fd_crit_pct` of the system max (“too many open files”) |
 | `health-conntrack`    | `cat …/nf_conntrack_count …/nf_conntrack_max` | tracked connections ≥ `conntrack_warn_pct`/`conntrack_crit_pct` of the table max (“nf_conntrack: table full” drops new connections); n/a if the module isn’t loaded |
+| `health-conntrack-drops` | `cat /proc/net/stat/nf_conntrack` (×2)  | `early_drop`+`insert_failed` **rate** ≥ `conntrack_drop_warn_pps`/`conntrack_drop_crit_pps` (the table was actually dropping connections, not just near-full); since-boot totals shown as context (were there drops already this boot?) |
 | `health-pids`         | `cat /proc/loadavg /proc/sys/kernel/pid_max` | kernel tasks ≥ `pid_warn_pct`/`pid_crit_pct` of `pid_max` (fork/clone start failing) |
 | `health-tcp-mem`      | `cat /proc/net/sockstat` + `tcp_mem`/`tcp_max_orphans`/`tcp_max_tw_buckets` | worst of TCP memory / orphan / TIME_WAIT usage ≥ `tcp_warn_pct`/`tcp_crit_pct` of its ceiling (connections dropped/throttled) |
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
