@@ -62,6 +62,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "cat /proc/loadavg /proc/sys/kernel/pid_max",
     // Network interface counters; sampled twice to derive throughput.
     "cat /proc/net/dev",
+    // TCP extended counters; sampled twice for the accept-queue overflow rate
+    // (ListenOverflows/ListenDrops) - the server failing to accept connections.
+    "cat /proc/net/netstat",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",

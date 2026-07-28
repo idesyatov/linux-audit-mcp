@@ -253,6 +253,31 @@ pub fn parse_pid_usage(output: &str) -> Option<(u64, u64)> {
     Some((tasks, pid_max))
 }
 
+/// Parse `ListenOverflows` and `ListenDrops` from `/proc/net/netstat` into
+/// `(overflows, drops)` cumulative counts. The file has header/value line pairs
+/// per section (`TcpExt:` names, then `TcpExt:` values); we find the columns by
+/// name so kernel-version column shifts don't matter. `None` if the `TcpExt`
+/// pair or either column is absent.
+pub fn parse_netstat_listen(output: &str) -> Option<(u64, u64)> {
+    let mut names: Option<Vec<&str>> = None;
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("TcpExt:") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        match &names {
+            None => names = Some(fields), // first TcpExt line = column names
+            Some(cols) => {
+                // second TcpExt line = values, in the same column order
+                let ovf = fields.get(cols.iter().position(|c| *c == "ListenOverflows")?)?;
+                let drops = fields.get(cols.iter().position(|c| *c == "ListenDrops")?)?;
+                return Some((ovf.parse().ok()?, drops.parse().ok()?));
+            }
+        }
+    }
+    None
+}
+
 /// One process row from `ps -eo pid,comm,pcpu,pmem`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProcInfo {
@@ -554,6 +579,17 @@ mod tests {
     fn conntrack_reads_count_and_max() {
         assert_eq!(parse_conntrack("12345\n262144\n"), Some((12345, 262_144)));
         assert_eq!(parse_conntrack("5"), None); // max line missing (module absent)
+    }
+
+    #[test]
+    fn netstat_listen_finds_columns_by_name() {
+        let out = "TcpExt: SyncookiesSent ListenOverflows ListenDrops TCPHPHits\n\
+                   TcpExt: 3 12 34 999\n\
+                   IpExt: InNoRoutes InTruncatedPkts\n\
+                   IpExt: 0 0\n";
+        assert_eq!(parse_netstat_listen(out), Some((12, 34)));
+        // No TcpExt value line -> None.
+        assert_eq!(parse_netstat_listen("IpExt: A B\nIpExt: 1 2\n"), None);
     }
 
     #[test]

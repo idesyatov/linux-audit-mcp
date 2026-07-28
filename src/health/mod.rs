@@ -55,6 +55,9 @@ const SUDO_PODMAN_PS: &str = "sudo -n podman ps -a";
 /// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
 /// [`evaluate`].
 const NETDEV: &str = "cat /proc/net/dev";
+/// TCP extended counters; sampled twice (alongside [`NETDEV`]) for the
+/// accept-queue overflow rate. Handled in [`collect`], not [`evaluate`].
+const NETSTAT: &str = "cat /proc/net/netstat";
 
 /// Commands snapped exactly once per snapshot.
 const SINGLE_SHOT: &[&str] = &[
@@ -96,6 +99,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     SUDO_DOCKER_PS,
     SUDO_PODMAN_PS,
     NETDEV,
+    NETSTAT,
 ];
 
 /// The wire command for a container probe: on a `privileged` target the `sudo -n`
@@ -260,6 +264,11 @@ pub struct Thresholds {
     /// or saturated queue shows a sustained nonzero rate.
     pub net_err_warn_pps: f64,
     pub net_err_crit_pps: f64,
+    /// TCP accept-queue overflow rate (events/s) over the sample window. A healthy
+    /// server accepts fast enough that this stays 0; a sustained rate means the
+    /// listen backlog is overflowing and connections are being dropped.
+    pub listen_overflow_warn_pps: f64,
+    pub listen_overflow_crit_pps: f64,
     /// Gap between the two `/proc/net/dev` samples, in seconds.
     pub net_sample_secs: u64,
     /// Failed systemd services: any failed unit is a `Warn`; this many or more
@@ -295,6 +304,8 @@ impl Default for Thresholds {
             net_tx_crit_mibps: 0.0,
             net_err_warn_pps: 1.0,
             net_err_crit_pps: 10.0,
+            listen_overflow_warn_pps: 1.0,
+            listen_overflow_crit_pps: 10.0,
             net_sample_secs: 1,
             failed_units_crit: 0,
             top_n: 5,
@@ -839,6 +850,45 @@ fn net_errors_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metr
     }
 }
 
+/// TCP accept-queue overflow rate from two `/proc/net/netstat` samples `dt_secs`
+/// apart. `ListenOverflows` counts times a completed connection couldn't be queued
+/// because the listen backlog was full - the server not accepting fast enough (a
+/// proxy/web outage that CPU and memory metrics miss). A healthy server holds this
+/// at 0, so any sustained rate is meaningful; `ListenDrops` is shown as context.
+/// Missing/unparseable netstat reports `Unknown`.
+fn net_listen_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-listen-overflows";
+    const TITLE: &str = "TCP accept-queue overflows";
+    if dt_secs <= 0.0 {
+        return unknown(ID, TITLE, "no measurable interval between samples");
+    }
+    let (Some((ovf1, drop1)), Some((ovf2, drop2))) = (
+        parse::parse_netstat_listen(s1),
+        parse::parse_netstat_listen(s2),
+    ) else {
+        return unknown(ID, TITLE, "netstat ListenOverflows unavailable");
+    };
+    // saturating: a counter reset (reboot) yields 0 rather than a spike.
+    let ovf_rate = ovf2.saturating_sub(ovf1) as f64 / dt_secs;
+    let drop_rate = drop2.saturating_sub(drop1) as f64 / dt_secs;
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(
+            ovf_rate,
+            thr.listen_overflow_warn_pps,
+            thr.listen_overflow_crit_pps,
+        ),
+        value: if ovf_rate > 0.0 {
+            format!("{ovf_rate:.1} overflow/s (drop {drop_rate:.1}/s)")
+        } else {
+            format!("no accept-queue overflows (since boot: {ovf2})")
+        },
+        detail: format!("over {dt_secs:.1}s; since boot: overflows {ovf2}, drops {drop2}"),
+        numeric: Some(ovf_rate),
+    }
+}
+
 /// Worst status across metrics (`Unknown` is neutral; `Unknown` overall only if
 /// nothing could be measured).
 fn worst(metrics: &[Metric]) -> HealthStatus {
@@ -949,13 +999,14 @@ pub async fn collect(
 
     let mut report = evaluate(&outputs, thr);
 
-    // Two timed samples of the interface counters -> throughput and error rate.
-    // A remote error on either read degrades to Unknown metrics; host-level errors
-    // abort.
-    let (throughput, errors) = match sample_net(ssh, thr).await? {
-        Some((s1, s2, dt)) => (
-            net_throughput_metric(&s1, &s2, dt, thr),
-            net_errors_metric(&s1, &s2, dt, thr),
+    // Two timed samples of the counter files -> throughput, error and accept-queue
+    // overflow rates. A remote error on the `dev` reads degrades to Unknown metrics;
+    // host-level errors abort.
+    let (throughput, errors, listen) = match sample_net(ssh, thr).await? {
+        Some(s) => (
+            net_throughput_metric(&s.dev1, &s.dev2, s.dt, thr),
+            net_errors_metric(&s.dev1, &s.dev2, s.dt, thr),
+            net_listen_metric(&s.stat1, &s.stat2, s.dt, thr),
         ),
         None => (
             unknown(
@@ -968,10 +1019,16 @@ pub async fn collect(
                 "Network errors",
                 "/proc/net/dev unavailable",
             ),
+            unknown(
+                "health-listen-overflows",
+                "TCP accept-queue overflows",
+                "/proc/net/dev unavailable",
+            ),
         ),
     };
     report.metrics.push(throughput);
     report.metrics.push(errors);
+    report.metrics.push(listen);
     report.overall = worst(&report.metrics);
     Ok(report)
 }
@@ -987,25 +1044,42 @@ async fn run_single(ssh: &SshConfig, cmd: &str) -> Result<Option<String>, SshErr
     }
 }
 
-/// Read `/proc/net/dev` twice, `net_sample_secs` apart, returning both samples
-/// and the elapsed seconds. `Ok(None)` if either read fails remotely.
-async fn sample_net(
-    ssh: &SshConfig,
-    thr: &Thresholds,
-) -> Result<Option<(String, String, f64)>, SshError> {
-    let first = match ssh.run(NETDEV).await {
+/// Two timed samples of the network counter files.
+struct NetSamples {
+    dev1: String,
+    dev2: String,
+    /// `/proc/net/netstat` at each point; empty if that read failed remotely
+    /// (the throughput/error metrics need only the `dev` pair).
+    stat1: String,
+    stat2: String,
+    dt: f64,
+}
+
+/// Read `/proc/net/dev` (and `/proc/net/netstat`) twice, `net_sample_secs` apart.
+/// `Ok(None)` if a `dev` read fails remotely; a failed `netstat` read just leaves
+/// its sample empty (that metric then reports `Unknown`).
+async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSamples>, SshError> {
+    let dev1 = match ssh.run(NETDEV).await {
         Ok(out) => out.stdout,
         Err(SshError::RemoteCommand { .. }) => return Ok(None),
         Err(host_level) => return Err(host_level),
     };
+    let stat1 = run_single(ssh, NETSTAT).await?.unwrap_or_default();
     let start = std::time::Instant::now();
     tokio::time::sleep(std::time::Duration::from_secs(thr.net_sample_secs.max(1))).await;
-    let second = match ssh.run(NETDEV).await {
+    let dev2 = match ssh.run(NETDEV).await {
         Ok(out) => out.stdout,
         Err(SshError::RemoteCommand { .. }) => return Ok(None),
         Err(host_level) => return Err(host_level),
     };
-    Ok(Some((first, second, start.elapsed().as_secs_f64())))
+    let stat2 = run_single(ssh, NETSTAT).await?.unwrap_or_default();
+    Ok(Some(NetSamples {
+        dev1,
+        dev2,
+        stat1,
+        stat2,
+        dt: start.elapsed().as_secs_f64(),
+    }))
 }
 
 fn human_bytes(n: u64) -> String {
@@ -1086,6 +1160,36 @@ mod tests {
         // A counter reset (second sample lower) yields 0, not a spike.
         let reset = net_errors_metric(s2, s1, 1.0, &thr);
         assert_eq!(reset.status, HealthStatus::Ok);
+    }
+
+    #[test]
+    fn net_listen_flags_rising_overflows() {
+        let thr = Thresholds::default(); // warn 1/s, crit 10/s
+        let hdr = "TcpExt: SyncookiesSent ListenOverflows ListenDrops\n";
+        let s1 = format!("{hdr}TcpExt: 3 100 200\n");
+        // +50 overflows over 1s -> 50/s -> Crit.
+        let s2 = format!("{hdr}TcpExt: 3 150 260\n");
+        let m = net_listen_metric(&s1, &s2, 1.0, &thr);
+        assert_eq!(m.status, HealthStatus::Crit);
+        assert_eq!(m.numeric, Some(50.0));
+        // No change -> Ok, value says no overflows.
+        let ok = net_listen_metric(&s1, &s1, 1.0, &thr);
+        assert_eq!(ok.status, HealthStatus::Ok);
+        assert!(
+            ok.value.contains("no accept-queue overflows"),
+            "{}",
+            ok.value
+        );
+        // Counter reset (second lower) -> 0, not a spike.
+        assert_eq!(
+            net_listen_metric(&s2, &s1, 1.0, &thr).status,
+            HealthStatus::Ok
+        );
+        // Missing netstat -> Unknown (never gates).
+        assert_eq!(
+            net_listen_metric("", "", 1.0, &thr).status,
+            HealthStatus::Unknown
+        );
     }
 
     #[test]

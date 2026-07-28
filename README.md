@@ -265,7 +265,9 @@ net_tx_warn_mibps = 0.0
 net_tx_crit_mibps = 0.0
 net_err_warn_pps = 1.0    # per-interface error rate (pkts/s); errors on a healthy NIC are ~0
 net_err_crit_pps = 10.0
-net_sample_secs = 1       # gap between the two /proc/net/dev samples
+listen_overflow_warn_pps = 1.0   # TCP accept-queue overflow rate (events/s); healthy = 0 (health-listen-overflows)
+listen_overflow_crit_pps = 10.0
+net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat samples
 failed_units_crit = 0     # failed systemd services: any → Warn; ≥ this count → Crit (0 = never Crit)
 top_n = 5                 # hot processes listed per resource
 ```
@@ -652,6 +654,7 @@ reported `UNKNOWN` and never gates.
 | `health-containers`   | `docker ps -a`, `podman ps -a` (`sudo -n …` on privileged targets) | a `Restarting` (crash-loop) container → Crit; `unhealthy` → Warn; no runtime → n/a |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
+| `health-listen-overflows` | `cat /proc/net/netstat` (×2, ~1s apart) | TCP accept-queue overflow rate (events/s) ≥ `listen_overflow_warn_pps`/`_crit_pps` (server not accepting fast enough) |
 
 The text report's headline is a **diagnosis**: the overall status followed by a
 compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0 err
