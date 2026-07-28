@@ -325,6 +325,14 @@ docker run --rm \
 | `--config`     | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |
 | `--fail-on`    | Exit 2 if any failed check is ≥ this severity. `off` disables. Default `high`. |
 | `--fail-under` | Exit 2 if the total score is below this value (0–100).              |
+| `--diff`       | After the report, show what changed vs this target's previous audit (text only). |
+| `--no-store`   | Don't append this audit to the on-disk history.                     |
+
+Every audit is recorded per target (append-only JSONL, next to the health history;
+`--no-store` opts out). `--diff` then compares this run to the previous stored
+snapshot and prints the **score delta**, **regressions** (checks that started
+failing) and **fixes** (checks that started passing) — so a security regression over
+time is obvious. Example: `audit --target web --diff`.
 
 `--check`/`--domain` select a subset (union of the two); `--skip` removes ids from
 it. An unknown id or domain is an error (typo protection). When any of the three is

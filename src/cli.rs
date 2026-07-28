@@ -84,6 +84,15 @@ pub struct AuditArgs {
     /// Exit 2 if the total score is below this value (0-100).
     #[arg(long)]
     fail_under: Option<u8>,
+
+    /// After the report, show what changed versus this target's previous audit
+    /// (score delta, regressions, fixes). Text format only.
+    #[arg(long)]
+    diff: bool,
+
+    /// Do not append this audit to the on-disk history (used by `--diff`).
+    #[arg(long)]
+    no_store: bool,
 }
 
 #[derive(Args)]
@@ -278,6 +287,24 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
     let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
     let outcomes = run::audit_targets(&cfg, &aliases, profile_override, &filter).await?;
 
+    // Diff each host against its previous stored audit BEFORE recording this one,
+    // so "previous" is genuinely the prior run (None = no history yet).
+    let diffs: Vec<(String, Option<history::AuditDiff>)> = if args.diff {
+        outcomes
+            .iter()
+            .filter_map(|o| {
+                let (score, findings) = o.result.as_ref().ok()?;
+                let cur = history::AuditSnapshot::from_audit(score, findings, 0);
+                let prev = history::read_recent_audit(&o.alias, 1)
+                    .ok()
+                    .and_then(|mut v| v.pop());
+                Some((o.alias.clone(), prev.map(|p| history::audit_diff(&p, &cur))))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     match &group {
         None => {
             let o = &outcomes[0];
@@ -294,6 +321,27 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
             Format::Json => println!("{}", run::audit_group_json(g, &outcomes)?),
         },
     }
+
+    if args.diff {
+        match args.format {
+            Format::Json => {
+                eprintln!("note: --diff output is text-only; ignored for --format json")
+            }
+            Format::Text => {
+                for (alias, diff) in &diffs {
+                    match diff {
+                        Some(d) => print!("{}", history::audit_diff_text(alias, d)),
+                        None => println!(
+                            "Audit changes for '{alias}': no prior audit snapshot to compare."
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    // Persist this audit so future `--diff` runs have a baseline (best-effort).
+    history::record_audit_outcomes(&outcomes, !args.no_store);
 
     Ok(audit_exit(&outcomes, args.fail_on, args.fail_under))
 }
@@ -471,6 +519,7 @@ mod tests {
                 assert_eq!(a.checks, vec!["kernel-aslr", "ssh-weak-crypto"]); // comma-split
                 assert_eq!(a.domains, vec!["firewall"]);
                 assert_eq!(a.skip, vec!["updates-security-pending"]);
+                assert!(!a.diff && !a.no_store); // default off
             }
             _ => panic!("expected audit subcommand"),
         }

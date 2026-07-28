@@ -118,6 +118,10 @@ impl AuditServer {
         .await
         .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
+        // Persist each audit so the recurring "pulse" builds up per-host posture
+        // history for later run-over-run diffing. Best-effort (errors are logged).
+        history::record_audit_outcomes(&outcomes, true);
+
         let (text, json) = match &group {
             None => {
                 let o = &outcomes[0];

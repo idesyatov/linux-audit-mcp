@@ -11,7 +11,7 @@ pub mod services;
 pub mod ssh;
 pub mod updates;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The `systemctl list-unit-files` listing shared by the firewall, services,
 /// logging and updates checks (each reads it via [`parse::parse_unit_files`]).
@@ -63,7 +63,7 @@ impl Domain {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Pass,

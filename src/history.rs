@@ -1,12 +1,13 @@
-//! Persistence of operational-health snapshots per target.
+//! Persistence of per-target snapshots: operational-health (`<alias>.jsonl`) and
+//! security-audit posture (`<alias>.audit.jsonl`).
 //!
-//! Append-only JSONL, one file per target alias (`<alias>.jsonl`), one snapshot
-//! per line. Deliberately file-based - no database dependency - so the static
-//! musl build (no C bindings) and the non-root Docker image stay simple, and the
-//! history is human-inspectable and trivially mounted as a volume.
+//! Append-only JSONL, one file per target alias, one snapshot per line.
+//! Deliberately file-based - no database dependency - so the static musl build
+//! (no C bindings) and the non-root Docker image stay simple, and the history is
+//! human-inspectable and trivially mounted as a volume.
 //!
-//! This module only records and lists history; the baselining/anomaly detection
-//! over it lives in [`crate::anomaly`].
+//! Health baselining/anomaly detection over the health history lives in
+//! [`crate::anomaly`]; the audit run-over-run diff lives here ([`audit_diff`]).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,8 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::checks::{Finding, Status};
 use crate::health::{HealthReport, HealthStatus};
-use crate::run::HealthOutcome;
+use crate::run::{AuditOutcome, HealthOutcome};
+use crate::scoring::{Profile, Score};
 
 /// Default cap on stored snapshots per target; override with
 /// `$LINUX_AUDIT_HISTORY_MAX` (`0` disables trimming). At an hourly cadence 1000
@@ -283,6 +286,263 @@ pub fn json(alias: &str, snaps: &[Snapshot]) -> serde_json::Result<String> {
     }))
 }
 
+// ---- audit snapshots + run-over-run diff --------------------------------
+
+/// One persisted security-audit reading: when it was taken, the overall score,
+/// the profile it was scored under, and the status of every check by id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditSnapshot {
+    pub ts: u64,
+    pub total: u8,
+    pub profile: Profile,
+    #[serde(default)]
+    pub findings: BTreeMap<String, Status>,
+}
+
+impl AuditSnapshot {
+    pub fn from_audit(score: &Score, findings: &[Finding], ts: u64) -> Self {
+        AuditSnapshot {
+            ts,
+            total: score.total,
+            profile: score.profile,
+            findings: findings
+                .iter()
+                .map(|f| (f.id.to_string(), f.status))
+                .collect(),
+        }
+    }
+}
+
+fn audit_file_in(dir: &Path, alias: &str) -> io::Result<PathBuf> {
+    Ok(dir.join(format!("{}.audit.jsonl", safe_alias(alias)?)))
+}
+
+/// Append one audit snapshot to `<alias>.audit.jsonl` under `dir`, then trim to
+/// the newest `max` (`max == 0` keeps everything).
+pub fn record_audit_in(
+    dir: &Path,
+    alias: &str,
+    snap: &AuditSnapshot,
+    max: usize,
+) -> io::Result<()> {
+    let path = audit_file_in(dir, alias)?;
+    fs::create_dir_all(dir)?;
+    let line = serde_json::to_string(snap).map_err(io::Error::other)? + "\n";
+    {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+    }
+    if max > 0 {
+        trim(&path, max)?;
+    }
+    Ok(())
+}
+
+/// Read the most recent `limit` audit snapshots (chronological) for a target
+/// under `dir`. Missing file -> empty; unparseable lines skipped.
+pub fn read_recent_audit_in(
+    dir: &Path,
+    alias: &str,
+    limit: usize,
+) -> io::Result<Vec<AuditSnapshot>> {
+    let path = audit_file_in(dir, alias)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut snaps: Vec<AuditSnapshot> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if limit > 0 && snaps.len() > limit {
+        snaps.drain(0..snaps.len() - limit);
+    }
+    Ok(snaps)
+}
+
+/// Read recent audit snapshots for a target from the default history directory.
+pub fn read_recent_audit(alias: &str, limit: usize) -> io::Result<Vec<AuditSnapshot>> {
+    read_recent_audit_in(&data_dir(), alias, limit)
+}
+
+/// Record each successful audit outcome to the default history directory
+/// (best-effort; a storage error is logged, never fails the audit).
+pub fn record_audit_outcomes(outcomes: &[AuditOutcome], store: bool) {
+    if !store {
+        return;
+    }
+    let (dir, max, ts) = (data_dir(), max_snapshots(), now_unix());
+    for o in outcomes {
+        if let Ok((score, findings)) = &o.result {
+            let snap = AuditSnapshot::from_audit(score, findings, ts);
+            if let Err(e) = record_audit_in(&dir, &o.alias, &snap, max) {
+                tracing::warn!("could not record audit history for '{}': {e}", o.alias);
+            }
+        }
+    }
+}
+
+/// A single check's status change between two audit snapshots.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FindingChange {
+    pub id: String,
+    pub from: Status,
+    pub to: Status,
+}
+
+/// What changed between a previous audit snapshot and the current one.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditDiff {
+    pub prev_ts: u64,
+    pub profile: Profile,
+    /// `true` if the two runs used different profiles (scores not comparable).
+    pub profile_changed: bool,
+    pub score_from: u8,
+    pub score_to: u8,
+    /// Checks that started failing (was not `fail`, now `fail`).
+    pub regressions: Vec<FindingChange>,
+    /// Checks that were fixed (was `fail`, now `pass`).
+    pub fixes: Vec<FindingChange>,
+    /// Any other status transition (e.g. pass->error, skipped->pass).
+    pub other_changes: Vec<FindingChange>,
+    /// Checks present now but not in the previous snapshot (e.g. tool upgraded).
+    pub new_checks: usize,
+    /// Checks present before but gone now.
+    pub removed_checks: usize,
+}
+
+impl AuditDiff {
+    /// `true` if nothing of substance changed (same score, no finding transitions).
+    pub fn is_unchanged(&self) -> bool {
+        self.score_from == self.score_to
+            && self.regressions.is_empty()
+            && self.fixes.is_empty()
+            && self.other_changes.is_empty()
+    }
+}
+
+/// Compute what changed from `prev` to `cur`.
+pub fn audit_diff(prev: &AuditSnapshot, cur: &AuditSnapshot) -> AuditDiff {
+    let (mut regressions, mut fixes, mut other) = (Vec::new(), Vec::new(), Vec::new());
+    for (id, &to) in &cur.findings {
+        match prev.findings.get(id) {
+            Some(&from) if from != to => {
+                let change = FindingChange {
+                    id: id.clone(),
+                    from,
+                    to,
+                };
+                if to == Status::Fail {
+                    regressions.push(change);
+                } else if from == Status::Fail && to == Status::Pass {
+                    fixes.push(change);
+                } else {
+                    other.push(change);
+                }
+            }
+            _ => {}
+        }
+    }
+    for v in [&mut regressions, &mut fixes, &mut other] {
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    let new_checks = cur
+        .findings
+        .keys()
+        .filter(|id| !prev.findings.contains_key(*id))
+        .count();
+    let removed_checks = prev
+        .findings
+        .keys()
+        .filter(|id| !cur.findings.contains_key(*id))
+        .count();
+    AuditDiff {
+        prev_ts: prev.ts,
+        profile: cur.profile,
+        profile_changed: prev.profile != cur.profile,
+        score_from: prev.total,
+        score_to: cur.total,
+        regressions,
+        fixes,
+        other_changes: other,
+        new_checks,
+        removed_checks,
+    }
+}
+
+/// Short status label for text rendering.
+fn status_label(s: Status) -> &'static str {
+    match s {
+        Status::Pass => "pass",
+        Status::Fail => "fail",
+        Status::Error => "error",
+        Status::Skipped => "skipped",
+    }
+}
+
+/// Human-readable audit diff.
+pub fn audit_diff_text(alias: &str, d: &AuditDiff) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let delta = i32::from(d.score_to) - i32::from(d.score_from);
+    let _ = writeln!(
+        out,
+        "Audit changes for '{alias}' since {} ({}): score {} -> {} ({delta:+})",
+        fmt_utc(d.prev_ts),
+        d.profile_name(),
+        d.score_from,
+        d.score_to,
+    );
+    if d.profile_changed {
+        let _ = writeln!(
+            out,
+            "  note: profile changed since the last run - scores are not comparable"
+        );
+    }
+    if d.is_unchanged() {
+        let _ = writeln!(out, "  no changes in findings.");
+    }
+    let mut section = |title: &str, changes: &[FindingChange]| {
+        if !changes.is_empty() {
+            let _ = writeln!(out, "  {title} ({}):", changes.len());
+            for c in changes {
+                let _ = writeln!(
+                    out,
+                    "    {}: {} -> {}",
+                    c.id,
+                    status_label(c.from),
+                    status_label(c.to)
+                );
+            }
+        }
+    };
+    section("regressions (now failing)", &d.regressions);
+    section("fixes (now passing)", &d.fixes);
+    section("other changes", &d.other_changes);
+    if d.new_checks > 0 || d.removed_checks > 0 {
+        let _ = writeln!(
+            out,
+            "  ({} check(s) added, {} removed since then)",
+            d.new_checks, d.removed_checks
+        );
+    }
+    out
+}
+
+impl AuditDiff {
+    fn profile_name(&self) -> &'static str {
+        match self.profile {
+            Profile::Baseline => "baseline",
+            Profile::Hardened => "hardened",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +623,66 @@ mod tests {
     fn missing_file_is_empty_not_error() {
         let d = TempDir::new();
         assert!(read_recent_in(d.path(), "nope", 10).unwrap().is_empty());
+    }
+
+    fn asnap(ts: u64, total: u8, findings: &[(&str, Status)]) -> AuditSnapshot {
+        AuditSnapshot {
+            ts,
+            total,
+            profile: Profile::Baseline,
+            findings: findings.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        }
+    }
+
+    #[test]
+    fn audit_snapshot_round_trips() {
+        let d = TempDir::new();
+        let s = asnap(1000, 79, &[("ssh-x", Status::Pass), ("fw-y", Status::Fail)]);
+        record_audit_in(d.path(), "web", &s, 0).unwrap();
+        let got = read_recent_audit_in(d.path(), "web", 10).unwrap();
+        assert_eq!(got, vec![s]);
+        // Health and audit files are separate (health read stays empty).
+        assert!(read_recent_in(d.path(), "web", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn audit_diff_flags_regressions_fixes_and_delta() {
+        let prev = asnap(
+            100,
+            79,
+            &[
+                ("ssh-weak-crypto", Status::Pass),
+                ("accounts-umask", Status::Fail),
+                ("firewall-enabled", Status::Pass),
+            ],
+        );
+        let cur = asnap(
+            200,
+            61,
+            &[
+                ("ssh-weak-crypto", Status::Fail),  // regression
+                ("accounts-umask", Status::Pass),   // fix
+                ("firewall-enabled", Status::Pass), // unchanged
+                ("kernel-new", Status::Pass),       // new check
+            ],
+        );
+        let d = audit_diff(&prev, &cur);
+        assert_eq!((d.score_from, d.score_to), (79, 61));
+        assert_eq!(d.regressions.len(), 1);
+        assert_eq!(d.regressions[0].id, "ssh-weak-crypto");
+        assert_eq!(d.fixes.len(), 1);
+        assert_eq!(d.fixes[0].id, "accounts-umask");
+        assert_eq!(d.new_checks, 1);
+        assert_eq!(d.removed_checks, 0);
+        assert!(!d.is_unchanged());
+        let text = audit_diff_text("web", &d);
+        assert!(text.contains("79 -> 61 (-18)"), "{text}");
+        assert!(text.contains("ssh-weak-crypto: pass -> fail"), "{text}");
+
+        // Identical snapshot -> unchanged.
+        let same = audit_diff(&prev, &prev);
+        assert!(same.is_unchanged());
+        assert!(audit_diff_text("web", &same).contains("no changes"));
     }
 
     #[test]
