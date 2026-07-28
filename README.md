@@ -257,6 +257,8 @@ conntrack_warn_pct = 80   # conntrack table fill as % of nf_conntrack_max (healt
 conntrack_crit_pct = 90
 pid_warn_pct = 80         # kernel tasks as % of pid_max (health-pids)
 pid_crit_pct = 90
+tcp_warn_pct = 80         # worst of TCP mem/orphan/TIME_WAIT as % of its ceiling (health-tcp-mem)
+tcp_crit_pct = 90
 iowait_warn_pct = 20.0    # CPU time waiting on I/O (%) — host is disk-bound
 iowait_crit_pct = 50.0
 net_rx_warn_mibps = 0.0   # per-interface throughput (MiB/s); 0 disables (informational)
@@ -648,6 +650,7 @@ reported `UNKNOWN` and never gates.
 | `health-fd`           | `cat /proc/sys/fs/file-nr`                 | open file descriptors ≥ `fd_warn_pct`/`fd_crit_pct` of the system max (“too many open files”) |
 | `health-conntrack`    | `cat …/nf_conntrack_count …/nf_conntrack_max` | tracked connections ≥ `conntrack_warn_pct`/`conntrack_crit_pct` of the table max (“nf_conntrack: table full” drops new connections); n/a if the module isn’t loaded |
 | `health-pids`         | `cat /proc/loadavg /proc/sys/kernel/pid_max` | kernel tasks ≥ `pid_warn_pct`/`pid_crit_pct` of `pid_max` (fork/clone start failing) |
+| `health-tcp-mem`      | `cat /proc/net/sockstat` + `tcp_mem`/`tcp_max_orphans`/`tcp_max_tw_buckets` | worst of TCP memory / orphan / TIME_WAIT usage ≥ `tcp_warn_pct`/`tcp_crit_pct` of its ceiling (connections dropped/throttled) |
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |

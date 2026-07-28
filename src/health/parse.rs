@@ -253,6 +253,66 @@ pub fn parse_pid_usage(output: &str) -> Option<(u64, u64)> {
     Some((tasks, pid_max))
 }
 
+/// Current TCP socket/memory usage and its ceilings, from `/proc/net/sockstat`
+/// concatenated with `tcp_mem`, `tcp_max_orphans`, `tcp_max_tw_buckets`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SockStat {
+    /// TCP memory in pages (from `sockstat` `TCP: … mem N`).
+    pub tcp_mem: u64,
+    /// Max TCP memory in pages (3rd value of `tcp_mem`: min/pressure/max).
+    pub tcp_mem_max: u64,
+    pub orphan: u64,
+    pub max_orphans: u64,
+    pub tw: u64,
+    pub max_tw: u64,
+}
+
+/// Parse the combined `cat /proc/net/sockstat <tcp_mem> <tcp_max_orphans>
+/// <tcp_max_tw_buckets>` output. The `sockstat` lines are `Label: k v …`; the
+/// three ceilings follow as bare number lines (no `:`), in that order. `None` if
+/// the `TCP:` line or any ceiling is missing.
+pub fn parse_sockstat(output: &str) -> Option<SockStat> {
+    let (mut mem, mut orphan, mut tw) = (None, None, None);
+    let mut ceilings: Vec<Vec<u64>> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("TCP:") {
+            let toks: Vec<&str> = rest.split_whitespace().collect();
+            for pair in toks.chunks(2) {
+                if let [k, v] = pair {
+                    if let Ok(n) = v.parse::<u64>() {
+                        match *k {
+                            "mem" => mem = Some(n),
+                            "orphan" => orphan = Some(n),
+                            "tw" => tw = Some(n),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        } else if !line.contains(':') {
+            let nums: Vec<u64> = line
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            if !nums.is_empty() {
+                ceilings.push(nums);
+            }
+        }
+    }
+    Some(SockStat {
+        tcp_mem: mem?,
+        tcp_mem_max: *ceilings.first()?.get(2)?, // tcp_mem: min pressure max
+        orphan: orphan?,
+        max_orphans: *ceilings.get(1)?.first()?,
+        tw: tw?,
+        max_tw: *ceilings.get(2)?.first()?,
+    })
+}
+
 /// Parse `ListenOverflows` and `ListenDrops` from `/proc/net/netstat` into
 /// `(overflows, drops)` cumulative counts. The file has header/value line pairs
 /// per section (`TcpExt:` names, then `TcpExt:` values); we find the columns by
@@ -579,6 +639,24 @@ mod tests {
     fn conntrack_reads_count_and_max() {
         assert_eq!(parse_conntrack("12345\n262144\n"), Some((12345, 262_144)));
         assert_eq!(parse_conntrack("5"), None); // max line missing (module absent)
+    }
+
+    #[test]
+    fn sockstat_reads_usage_and_ceilings() {
+        let out = "sockets: used 431\n\
+                   TCP: inuse 20 orphan 5 tw 34 alloc 25 mem 9000\n\
+                   UDP: inuse 8 mem 1\n\
+                   FRAG: inuse 0 memory 0\n\
+                   4096 6144 9216\n\
+                   65536\n\
+                   16384\n";
+        let s = parse_sockstat(out).unwrap();
+        assert_eq!(s.tcp_mem, 9000);
+        assert_eq!(s.tcp_mem_max, 9216); // 3rd tcp_mem value
+        assert_eq!((s.orphan, s.max_orphans), (5, 65536));
+        assert_eq!((s.tw, s.max_tw), (34, 16384));
+        // Missing ceilings -> None.
+        assert!(parse_sockstat("TCP: inuse 1 orphan 0 tw 0 mem 1\n").is_none());
     }
 
     #[test]

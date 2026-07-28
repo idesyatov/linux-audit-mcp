@@ -57,6 +57,10 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // ("nf_conntrack: table full") drops new connections - a NAT/firewall/proxy
     // outage. Both files vanish when the module isn't loaded (then: Unknown).
     "cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max",
+    // TCP socket/memory pressure: /proc/net/sockstat (TCP mem pages, orphan and
+    // TIME_WAIT counts) plus their ceilings (tcp_mem max, tcp_max_orphans,
+    // tcp_max_tw_buckets). Nearing any ceiling drops/throttles connections.
+    "cat /proc/net/sockstat /proc/sys/net/ipv4/tcp_mem /proc/sys/net/ipv4/tcp_max_orphans /proc/sys/net/ipv4/tcp_max_tw_buckets",
     // Task saturation: /proc/loadavg (its 4th field is running/total tasks) and the
     // PID ceiling. Near the ceiling, fork()/clone() fail and nothing new can start.
     "cat /proc/loadavg /proc/sys/kernel/pid_max",

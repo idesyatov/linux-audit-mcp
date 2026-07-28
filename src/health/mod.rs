@@ -34,6 +34,10 @@ const CONNTRACK: &str =
     "cat /proc/sys/net/netfilter/nf_conntrack_count /proc/sys/net/netfilter/nf_conntrack_max";
 /// Task saturation: `/proc/loadavg` (running/total tasks) then the PID ceiling.
 const PIDS: &str = "cat /proc/loadavg /proc/sys/kernel/pid_max";
+/// TCP socket/memory pressure: `/proc/net/sockstat` then the three ceilings
+/// (`tcp_mem`, `tcp_max_orphans`, `tcp_max_tw_buckets`), in that order.
+const SOCKSTAT: &str =
+    "cat /proc/net/sockstat /proc/sys/net/ipv4/tcp_mem /proc/sys/net/ipv4/tcp_max_orphans /proc/sys/net/ipv4/tcp_max_tw_buckets";
 const PS: &str = "ps -eo pid,comm,pcpu,pmem --sort=-pcpu";
 const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
@@ -69,6 +73,7 @@ const SINGLE_SHOT: &[&str] = &[
     FILE_NR,
     CONNTRACK,
     PIDS,
+    SOCKSTAT,
     PS,
     SS,
     VMSTAT,
@@ -90,6 +95,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     FILE_NR,
     CONNTRACK,
     PIDS,
+    SOCKSTAT,
     PS,
     SS,
     VMSTAT,
@@ -249,6 +255,10 @@ pub struct Thresholds {
     /// Kernel tasks as a percent of `pid_max` (`health-pids`).
     pub pid_warn_pct: u8,
     pub pid_crit_pct: u8,
+    /// Worst of TCP memory / orphan / TIME_WAIT usage as a percent of its ceiling
+    /// (`health-tcp-mem`).
+    pub tcp_warn_pct: u8,
+    pub tcp_crit_pct: u8,
     /// CPU time waiting on I/O (`wa`, percent); a sustained high value means the
     /// host is disk-bound.
     pub iowait_warn_pct: f64,
@@ -296,6 +306,8 @@ impl Default for Thresholds {
             conntrack_crit_pct: 90,
             pid_warn_pct: 80,
             pid_crit_pct: 90,
+            tcp_warn_pct: 80,
+            tcp_crit_pct: 90,
             iowait_warn_pct: 20.0,
             iowait_crit_pct: 50.0,
             net_rx_warn_mibps: 0.0,
@@ -569,6 +581,51 @@ fn pids_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
         value: format!("{pct:.0}% used"),
         detail: format!("{tasks} of {pid_max} max PIDs (tasks/threads)"),
         numeric: Some(pct),
+    }
+}
+
+/// TCP socket/memory pressure, from `/proc/net/sockstat` and the kernel ceilings.
+/// Reports the worst of three exhaustion modes: TCP memory (pages vs `tcp_mem`
+/// max), orphaned sockets (vs `tcp_max_orphans`) and TIME_WAIT sockets (vs
+/// `tcp_max_tw_buckets`). Any of them filling up drops or throttles connections -
+/// a proxy/web outage independent of CPU and memory. Missing input -> `Unknown`.
+fn tcp_mem_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-tcp-mem";
+    const TITLE: &str = "TCP memory/socket pressure";
+    let Some(s) = out(outputs, SOCKSTAT).and_then(parse::parse_sockstat) else {
+        return unknown(ID, TITLE, "sockstat/tcp limits unavailable");
+    };
+    if s.tcp_mem_max == 0 || s.max_orphans == 0 || s.max_tw == 0 {
+        return unknown(ID, TITLE, "a TCP ceiling is zero");
+    }
+    let pct = |used: u64, max: u64| used as f64 / max as f64 * 100.0;
+    let dims = [
+        ("mem", pct(s.tcp_mem, s.tcp_mem_max)),
+        ("orphan", pct(s.orphan, s.max_orphans)),
+        ("tw", pct(s.tw, s.max_tw)),
+    ];
+    let (label, worst) = dims
+        .iter()
+        .copied()
+        .fold(("mem", 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(worst, thr.tcp_warn_pct as f64, thr.tcp_crit_pct as f64),
+        value: format!("{label} {worst:.0}% of limit"),
+        detail: format!(
+            "mem {}/{} ({:.0}%), orphan {}/{} ({:.0}%), tw {}/{} ({:.0}%)",
+            s.tcp_mem,
+            s.tcp_mem_max,
+            dims[0].1,
+            s.orphan,
+            s.max_orphans,
+            dims[1].1,
+            s.tw,
+            s.max_tw,
+            dims[2].1,
+        ),
+        numeric: Some(worst),
     }
 }
 
@@ -910,6 +967,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(fd_metric(outputs, thr));
     metrics.push(conntrack_metric(outputs, thr));
     metrics.push(pids_metric(outputs, thr));
+    metrics.push(tcp_mem_metric(outputs, thr));
     metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
     metrics.push(failed_units_metric(outputs, thr));
@@ -1380,6 +1438,33 @@ mod tests {
         assert_eq!(m("9 9 9 5/31000 900\n32768\n"), HealthStatus::Crit); // 95%
         assert_eq!(
             pids_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn tcp_mem_worst_of_three_dimensions() {
+        let thr = Thresholds::default(); // warn 80, crit 90
+        const CMD: &str = "cat /proc/net/sockstat /proc/sys/net/ipv4/tcp_mem /proc/sys/net/ipv4/tcp_max_orphans /proc/sys/net/ipv4/tcp_max_tw_buckets";
+        let sock = |mem: u64, orphan: u64, tw: u64| {
+            format!(
+                "sockets: used 1\n\
+                 TCP: inuse 1 orphan {orphan} tw {tw} alloc 1 mem {mem}\n\
+                 4096 6144 9216\n65536\n65536\n"
+            )
+        };
+        let m = |a: String| tcp_mem_metric(&outputs(&[(CMD, a.as_str())]), &thr).status;
+        // All low -> Ok.
+        assert_eq!(m(sock(100, 100, 100)), HealthStatus::Ok);
+        // TIME_WAIT near its bucket max (55000/65536 = 84%) -> Warn.
+        assert_eq!(m(sock(100, 100, 55000)), HealthStatus::Warn);
+        // TCP memory near tcp_mem max (9000/9216 = 98%) -> Crit, even if others low.
+        let crit = tcp_mem_metric(&outputs(&[(CMD, sock(9000, 100, 100).as_str())]), &thr);
+        assert_eq!(crit.status, HealthStatus::Crit);
+        assert!(crit.value.contains("mem"), "{}", crit.value);
+        // Missing input -> Unknown.
+        assert_eq!(
+            tcp_mem_metric(&outputs(&[]), &thr).status,
             HealthStatus::Unknown
         );
     }

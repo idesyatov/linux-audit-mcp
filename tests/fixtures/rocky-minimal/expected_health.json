@@ -9,6 +9,7 @@
     "health-fd": "ok",
     "health-conntrack": "crit",
     "health-pids": "warn",
+    "health-tcp-mem": "crit",
     "health-iowait": "crit",
     "health-connections": "ok",
     "health-failed-units": "warn",
