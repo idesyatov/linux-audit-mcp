@@ -126,6 +126,21 @@ pub trait Check: Send + Sync {
     fn privileged(&self) -> bool {
         false
     }
+    /// `true` if this check's command is a package-manager tool that may be
+    /// absent on some distros (e.g. `apt-get` on RHEL, `dnf` on Debian). When
+    /// the tool isn't installed the check is reported as [`Status::Skipped`]
+    /// (not applicable) rather than [`Status::Error`].
+    fn skip_if_tool_missing(&self) -> bool {
+        false
+    }
+    /// `true` if a non-zero exit from this check's command should still yield its
+    /// (partial) stdout for evaluation instead of an `Error` finding. For a
+    /// whole-filesystem scan like `find /`, a transient per-path error (a racing
+    /// `/proc` entry, an unreadable mount) sets a non-zero exit even though the
+    /// listing is complete enough to judge; such checks opt in here.
+    fn tolerate_nonzero_exit(&self) -> bool {
+        false
+    }
     /// An optional privileged command whose output *supersedes* [`command`] when
     /// the target is opted in (`privileged = true`) and the command succeeded -
     /// e.g. `sudo -n sshd -T` yields the effective SSH config. When the target
@@ -209,6 +224,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(accounts::SystemLoginShells),
         Box::new(accounts::ShadowEmptyPassword), // privileged (sudo)
         Box::new(accounts::ShadowWeakHash),      // privileged (sudo)
+        Box::new(accounts::ShadowPasswordExpiry), // privileged (sudo)
         // kernel
         Box::new(kernel::Aslr),
         Box::new(kernel::TcpSyncookies),
@@ -222,9 +238,11 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(kernel::SuidDumpable),
         Box::new(kernel::UnprivilegedBpf),
         Box::new(kernel::MountOptions),
+        Box::new(kernel::SuidBinaries), // privileged (sudo)
         // firewall
         Box::new(firewall::FirewallEnabled),
         Box::new(firewall::NftDefaultDeny), // privileged (sudo)
+        Box::new(firewall::IptablesDefaultDeny), // privileged (sudo)
         // updates
         Box::new(updates::SecurityUpdatesPending),
         Box::new(updates::SecurityUpdatesPendingDnf),

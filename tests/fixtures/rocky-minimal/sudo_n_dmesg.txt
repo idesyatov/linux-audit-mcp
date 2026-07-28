@@ -1,0 +1,3 @@
+[ 1234.567890] systemd[1]: Started Journal Service.
+[ 5678.901234] xray invoked oom-killer: gfp_mask=0x100cca(GFP_HIGHUSER_MOVABLE), order=0, oom_score_adj=0
+[ 5678.901240] Out of memory: Killed process 675 (xray) total-vm:1450000kB, anon-rss:930000kB, file-rss:0kB

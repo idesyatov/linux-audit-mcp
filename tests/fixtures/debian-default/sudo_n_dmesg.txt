@@ -1,0 +1,4 @@
+[    0.000000] Linux version 6.1.0-18-amd64
+[    1.234567] EXT4-fs (vda1): mounted filesystem with ordered data mode.
+[   12.345678] systemd[1]: Started Journal Service.
+[   45.678901] nginx[812]: start worker processes

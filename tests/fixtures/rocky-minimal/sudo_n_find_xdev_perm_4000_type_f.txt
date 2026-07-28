@@ -1,0 +1,10 @@
+/usr/bin/sudo
+/usr/bin/su
+/usr/bin/passwd
+/usr/bin/chage
+/usr/bin/mount
+/usr/bin/umount
+/usr/bin/pkexec
+/usr/sbin/unix_chkpwd
+/usr/sbin/pam_timestamp_check
+/usr/local/bin/rootshell

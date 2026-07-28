@@ -14,6 +14,7 @@ use crate::config::{self, Config};
 use crate::health::{self, HealthStatus};
 use crate::history;
 use crate::report;
+use crate::report_sarif;
 use crate::run::{self, AuditOutcome, HealthOutcome};
 use crate::scoring::{Profile, Score};
 
@@ -38,6 +39,8 @@ pub enum Command {
     Health(HealthArgs),
     /// Show the recorded health-snapshot history for a target (trend inspection).
     History(HistoryArgs),
+    /// Show the recorded security-audit history for a target (score trend).
+    AuditHistory(HistoryArgs),
 }
 
 #[derive(Args)]
@@ -153,6 +156,8 @@ pub enum FailOnStatus {
 pub enum Format {
     Text,
     Json,
+    /// SARIF 2.1.0 - for GitHub code scanning / dashboards (audit only).
+    Sarif,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -312,6 +317,9 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
                 Ok((score, findings)) => match args.format {
                     Format::Text => print!("{}", report::text(&o.alias, score, findings)),
                     Format::Json => println!("{}", report::json(&o.alias, score, findings)?),
+                    Format::Sarif => {
+                        println!("{}", report_sarif::sarif(&o.alias, score, findings)?)
+                    }
                 },
                 Err(e) => eprintln!("audit of '{}' failed: {e}", o.alias),
             }
@@ -319,13 +327,19 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
         Some(g) => match args.format {
             Format::Text => print!("{}", run::audit_group_text(g, &outcomes)),
             Format::Json => println!("{}", run::audit_group_json(g, &outcomes)?),
+            Format::Sarif => println!("{}", report_sarif::sarif_group(&outcomes)?),
         },
     }
 
     if args.diff {
         match args.format {
             Format::Json => {
-                eprintln!("note: --diff output is text-only; ignored for --format json")
+                for (alias, diff) in &diffs {
+                    println!("{}", history::audit_diff_json(alias, diff.as_ref())?);
+                }
+            }
+            Format::Sarif => {
+                eprintln!("note: --diff is not represented in SARIF; ignored for --format sarif")
             }
             Format::Text => {
                 for (alias, diff) in &diffs {
@@ -397,6 +411,7 @@ pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
                 Ok(report) => match args.format {
                     Format::Text => print!("{}", health::report::text(&o.alias, report)),
                     Format::Json => println!("{}", health::report::json(&o.alias, report)?),
+                    Format::Sarif => anyhow::bail!("SARIF format is only supported by `audit`"),
                 },
                 Err(e) => eprintln!("health snapshot of '{}' failed: {e}", o.alias),
             }
@@ -404,6 +419,7 @@ pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
         Some(g) => match args.format {
             Format::Text => print!("{}", run::health_group_text(g, &outcomes)),
             Format::Json => println!("{}", run::health_group_json(g, &outcomes)?),
+            Format::Sarif => anyhow::bail!("SARIF format is only supported by `audit`"),
         },
     }
 
@@ -422,6 +438,24 @@ pub fn run_history(args: HistoryArgs) -> anyhow::Result<i32> {
     match args.format {
         Format::Text => print!("{}", history::text(&args.target, &snaps)),
         Format::Json => println!("{}", history::json(&args.target, &snaps)?),
+        Format::Sarif => anyhow::bail!("SARIF format is only supported by `audit`"),
+    }
+    Ok(0)
+}
+
+/// Print the recorded security-audit history for a target (score trend). Reads
+/// local files only (no SSH); the alias is validated against the config.
+pub fn run_audit_history(args: HistoryArgs) -> anyhow::Result<i32> {
+    let cfg = load_config(&args.config)?;
+    if !cfg.targets.contains_key(&args.target) {
+        anyhow::bail!("unknown target {:?}", args.target);
+    }
+    let snaps = history::read_recent_audit(&args.target, args.limit)
+        .with_context(|| format!("reading audit history for {:?}", args.target))?;
+    match args.format {
+        Format::Text => print!("{}", history::audit_text(&args.target, &snaps)),
+        Format::Json => println!("{}", history::audit_json(&args.target, &snaps)?),
+        Format::Sarif => anyhow::bail!("SARIF format is only supported by `audit`"),
     }
     Ok(0)
 }

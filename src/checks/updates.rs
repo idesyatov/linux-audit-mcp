@@ -1,9 +1,10 @@
 //! Updates-domain checks: pending security updates (apt and dnf) and whether
 //! automatic updates are enabled.
 //!
-//! `apt`/`dnf` are per-distro: each errors on the other family's host, and the
-//! audit records that as an `Error` finding (excluded from the score), so a
-//! Debian host is judged by the apt check and a RHEL host by the dnf check.
+//! `apt`/`dnf` are per-distro: on the other family's host the tool is absent, so
+//! the command exits 127 and the check is reported `Skipped` (not applicable,
+//! excluded from the score) via [`Check::skip_if_tool_missing`]. A Debian host is
+//! judged by the apt check and a RHEL host by the dnf check.
 
 use super::parse::{parse_unit_files, service_enabled};
 use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
@@ -32,6 +33,9 @@ impl Check for SecurityUpdatesPending {
     }
     fn command(&self) -> &'static str {
         APT_SIM_CMD
+    }
+    fn skip_if_tool_missing(&self) -> bool {
+        true
     }
     fn evaluate(&self, output: &str) -> Outcome {
         // `Inst <pkg> (... Debian-Security ...)` marks a security upgrade.
@@ -72,6 +76,9 @@ impl Check for SecurityUpdatesPendingDnf {
     }
     fn command(&self) -> &'static str {
         DNF_SEC_CMD
+    }
+    fn skip_if_tool_missing(&self) -> bool {
+        true
     }
     fn evaluate(&self, output: &str) -> Outcome {
         // Each advisory row has at least three fields (advisory, severity, package);

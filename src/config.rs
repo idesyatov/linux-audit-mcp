@@ -45,6 +45,10 @@ pub struct HostVars {
     pub port: Option<u16>,
     pub user: Option<String>,
     pub identity_file: Option<PathBuf>,
+    /// Pin the host key with a custom `known_hosts` file (`ssh -o
+    /// UserKnownHostsFile`). Pairs with `strict_host_key = "yes"` for strict
+    /// verification. Unset leaves ssh's default (`~/.ssh/known_hosts`).
+    pub known_hosts: Option<PathBuf>,
     pub strict_host_key: Option<StrictHostKeyMode>,
     pub connect_timeout_secs: Option<u64>,
     pub command_timeout_secs: Option<u64>,
@@ -78,6 +82,7 @@ pub struct ResolvedTarget {
     pub port: u16,
     pub user: String,
     pub identity_file: Option<PathBuf>,
+    pub known_hosts: Option<PathBuf>,
     pub strict_host_key: StrictHostKeyMode,
     pub connect_timeout_secs: u64,
     pub command_timeout_secs: u64,
@@ -123,7 +128,7 @@ impl ResolvedTarget {
             connect_timeout: Duration::from_secs(self.connect_timeout_secs),
             command_timeout: Duration::from_secs(self.command_timeout_secs),
             strict_host_key: self.strict_host_key.into(),
-            known_hosts: None,
+            known_hosts: self.known_hosts.as_deref().map(expand_tilde),
             extra_opts: Vec::new(),
         }
     }
@@ -186,6 +191,13 @@ impl Config {
                 &groups,
                 |h| h.identity_file.clone(),
                 "identity_file",
+                alias,
+            )?,
+            known_hosts: inherit(
+                v.known_hosts.clone(),
+                &groups,
+                |h| h.known_hosts.clone(),
+                "known_hosts",
                 alias,
             )?,
             strict_host_key: inherit(
@@ -570,6 +582,79 @@ mod tests {
         // Default is false (opt-in).
         let plain: Config = toml::from_str("[targets.c]\nhost = \"3.3.3.3\"").unwrap();
         assert!(!plain.resolve("c").unwrap().privileged);
+    }
+
+    #[test]
+    fn known_hosts_pins_and_inherits() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.prod]
+            members = ["web", "db"]
+            known_hosts = "/etc/audit/known_hosts"
+            strict_host_key = "yes"
+
+            [targets.web]
+            host = "1.1.1.1"
+
+            [targets.db]
+            host = "2.2.2.2"
+            known_hosts = "~/db_known_hosts"
+            "#,
+        )
+        .unwrap();
+
+        // web inherits the group's pinned known_hosts + strict verification.
+        let web = cfg.resolve("web").unwrap();
+        let ssh = web.to_ssh_config();
+        assert_eq!(
+            ssh.known_hosts,
+            Some(PathBuf::from("/etc/audit/known_hosts"))
+        );
+        assert_eq!(ssh.strict_host_key, StrictHostKey::Yes);
+
+        // db overrides with its own (tilde-expanded) path.
+        let db = cfg.resolve("db").unwrap();
+        let kh = db.to_ssh_config().known_hosts.unwrap();
+        assert!(kh.ends_with("db_known_hosts"));
+        assert!(!kh.starts_with("~"));
+
+        // No known_hosts set -> None (ssh default).
+        let plain: Config = toml::from_str("[targets.c]\nhost = \"3.3.3.3\"").unwrap();
+        assert!(plain
+            .resolve("c")
+            .unwrap()
+            .to_ssh_config()
+            .known_hosts
+            .is_none());
+    }
+
+    #[test]
+    fn identity_file_inherits_from_group() {
+        std::env::remove_var("LINUX_AUDIT_IDENTITY_FILE");
+        let cfg: Config = toml::from_str(
+            r#"
+            [groups.fleet]
+            members = ["web", "db"]
+            identity_file = "/keys/fleet_ed25519"
+
+            [targets.web]
+            host = "1.1.1.1"
+
+            [targets.db]
+            host = "2.2.2.2"
+            identity_file = "/keys/db_ed25519"
+            "#,
+        )
+        .unwrap();
+        // web inherits the group key; db overrides with its own.
+        assert_eq!(
+            cfg.resolve("web").unwrap().identity_file,
+            Some(PathBuf::from("/keys/fleet_ed25519"))
+        );
+        assert_eq!(
+            cfg.resolve("db").unwrap().identity_file,
+            Some(PathBuf::from("/keys/db_ed25519"))
+        );
     }
 
     #[test]

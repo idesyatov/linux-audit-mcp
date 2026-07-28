@@ -109,7 +109,13 @@ pub enum SshError {
     /// The host was unreachable (DNS/connect/transport failure).
     Connection(String),
     /// `ssh` connected but the remote command returned a non-zero status.
-    RemoteCommand { code: Option<i32>, stderr: String },
+    /// `stdout` is preserved so a check that opts into tolerating a non-zero
+    /// exit (e.g. `find /` racing transient errors) can still use partial output.
+    RemoteCommand {
+        code: Option<i32>,
+        stderr: String,
+        stdout: String,
+    },
 }
 
 impl fmt::Display for SshError {
@@ -123,7 +129,7 @@ impl fmt::Display for SshError {
             Self::Timeout => write!(f, "ssh command timed out"),
             Self::Auth(s) => write!(f, "authentication failed: {s}"),
             Self::Connection(s) => write!(f, "connection failed: {s}"),
-            Self::RemoteCommand { code, stderr } => {
+            Self::RemoteCommand { code, stderr, .. } => {
                 write!(f, "remote command failed (code {code:?}): {stderr}")
             }
         }
@@ -319,6 +325,7 @@ impl SshConfig {
         Err(SshError::RemoteCommand {
             code: output.status.code(),
             stderr: stderr.trim().to_string(),
+            stdout,
         })
     }
 }

@@ -14,6 +14,7 @@ mod config;
 mod health;
 mod history;
 mod report;
+mod report_sarif;
 mod run;
 mod scoring;
 mod server;
@@ -43,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Audit(args) => cli::run_audit(args).await?,
         cli::Command::Health(args) => cli::run_health(args).await?,
         cli::Command::History(args) => cli::run_history(args)?,
+        cli::Command::AuditHistory(args) => cli::run_audit_history(args)?,
     };
 
     std::process::exit(code);

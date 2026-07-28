@@ -13,6 +13,8 @@
     "health-iowait": "ok",
     "health-connections": "ok",
     "health-failed-units": "ok",
+    "health-zombies": "ok",
+    "health-oom": "unknown",
     "health-containers": "ok"
   },
   "overall": "ok"

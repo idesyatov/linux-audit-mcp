@@ -5,10 +5,13 @@
 //! ruleset (`sudo -n nft list ruleset`) to confirm inbound traffic is actually
 //! denied by default, not just that a firewall service is running.
 
-use super::parse::{nft_input_policy, parse_unit_files, service_enabled, NftInput};
+use super::parse::{
+    iptables_input_policy, nft_input_policy, parse_unit_files, service_enabled, NftInput,
+};
 use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
 
 const NFT_CMD: &str = "sudo -n nft list ruleset";
+const IPTABLES_CMD: &str = "sudo -n iptables -S";
 
 /// No recognised host firewall service is enabled.
 pub struct FirewallEnabled;
@@ -97,6 +100,57 @@ impl Check for NftDefaultDeny {
     }
 }
 
+/// The live iptables-legacy ruleset has an INPUT chain that accepts everything.
+/// Privileged: reads `sudo -n iptables -S`, the authoritative view of hosts on
+/// the iptables-legacy backend (invisible to nft). Complements
+/// [`NftDefaultDeny`]: on an nft-native host `iptables -S` shows no INPUT chain
+/// and this defers (pass); on a legacy host nft defers and this gives the real
+/// verdict. Symmetric defer semantics keep at most one firewall-posture failure
+/// per host, so the two checks never double-penalise the same problem.
+pub struct IptablesDefaultDeny;
+
+impl Check for IptablesDefaultDeny {
+    fn id(&self) -> &'static str {
+        "firewall-iptables-default-deny"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Firewall
+    }
+    fn title(&self) -> &'static str {
+        "No default-deny on the iptables INPUT chain"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Set a default-deny inbound policy on the INPUT chain: iptables -P INPUT DROP \
+         (after allowing loopback and established connections), or adopt ufw/firewalld."
+    }
+    fn command(&self) -> &'static str {
+        IPTABLES_CMD
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        match iptables_input_policy(output) {
+            NftInput::DefaultDeny => Outcome::pass(
+                "INPUT chain denies by default (policy DROP, or a DROP/REJECT rule is present).",
+            ),
+            NftInput::AcceptAll => Outcome::fail(
+                "INPUT chain accepts by default with no deny rule (inbound traffic is open).",
+            ),
+            // No INPUT chain here: the host may filter via nftables (invisible to
+            // iptables-legacy), so don't false-fail. firewall-enabled and
+            // firewall-nft-default-deny cover the nft-native case.
+            NftInput::NoInputHook | NftInput::NoRuleset => Outcome::pass(
+                "No iptables-legacy INPUT chain; the host may filter via nftables \
+                 (not visible via iptables-legacy).",
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -134,5 +188,23 @@ mod tests {
                             }\n";
         assert_eq!(NftDefaultDeny.evaluate(forward_only).status, Status::Pass);
         assert!(NftDefaultDeny.privileged());
+    }
+
+    #[test]
+    fn iptables_default_deny() {
+        assert!(IptablesDefaultDeny.privileged());
+        // Policy DROP -> pass.
+        let deny = "-P INPUT DROP\n-A INPUT -i lo -j ACCEPT\n";
+        assert_eq!(IptablesDefaultDeny.evaluate(deny).status, Status::Pass);
+        // Accept-all with no deny rule -> fail.
+        let accept = "-P INPUT ACCEPT\n-A INPUT -p tcp --dport 22 -j ACCEPT\n";
+        assert_eq!(IptablesDefaultDeny.evaluate(accept).status, Status::Fail);
+        // No INPUT chain (nft-native host): defer, not fail.
+        assert_eq!(IptablesDefaultDeny.evaluate("").status, Status::Pass);
+        let forward_only = "-P FORWARD DROP\n-P OUTPUT ACCEPT\n";
+        assert_eq!(
+            IptablesDefaultDeny.evaluate(forward_only).status,
+            Status::Pass
+        );
     }
 }

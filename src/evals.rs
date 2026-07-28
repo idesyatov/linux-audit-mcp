@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::audit::{self, Outputs};
+use crate::audit::{self, CmdError, Outputs};
 use crate::checks::{all_checks, Status};
 use crate::health::{self, HealthStatus, Thresholds, HEALTH_COMMANDS};
 use crate::scoring::{score, Profile};
@@ -88,9 +88,15 @@ fn run_scenario(scenario: &Path, name: &str) {
         } else if check.privileged() {
             continue; // not opted in -> Skipped
         } else {
+            // An absent file means the command wasn't available: for a
+            // package-manager check that models the tool not being installed
+            // (Skipped); for any other check it's an Error.
             outputs.insert(
                 cmd,
-                Err(format!("command not available on this fixture: {cmd}")),
+                Err(CmdError {
+                    message: format!("command not available on this fixture: {cmd}"),
+                    not_found: check.skip_if_tool_missing(),
+                }),
             );
         }
     }
@@ -202,7 +208,9 @@ fn run_health_scenario(scenario: &Path, name: &str) {
             Ok(std::fs::read_to_string(&file)
                 .unwrap_or_else(|e| panic!("[{name}] read {}: {e}", file.display())))
         } else {
-            Err(format!("command not available on this fixture: {cmd}"))
+            Err(CmdError::other(format!(
+                "command not available on this fixture: {cmd}"
+            )))
         };
         outputs.insert(cmd, value);
     }

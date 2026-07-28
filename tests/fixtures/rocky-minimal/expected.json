@@ -1,5 +1,5 @@
 {
-  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, a system account with a login shell (svc, uid 150), ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (updates check errors). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
+  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, a never-expiring password, an unexpected setuid-root binary (/usr/local/bin/rootshell), a system account with a login shell (svc, uid 150), ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (the apt updates check is skipped as not applicable). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
   "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
@@ -18,6 +18,7 @@
     "accounts-system-login-shells": "fail",
     "accounts-shadow-empty-password": "fail",
     "accounts-shadow-weak-hash": "fail",
+    "accounts-shadow-password-expiry": "fail",
     "kernel-aslr": "pass",
     "kernel-tcp-syncookies": "pass",
     "kernel-rp-filter": "pass",
@@ -30,9 +31,11 @@
     "kernel-suid-dumpable": "fail",
     "kernel-unprivileged-bpf": "fail",
     "kernel-mount-options": "fail",
+    "kernel-suid-binaries": "fail",
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "pass",
-    "updates-security-pending": "error",
+    "firewall-iptables-default-deny": "pass",
+    "updates-security-pending": "skipped",
     "updates-security-pending-dnf": "fail",
     "updates-auto-updates": "pass",
     "services-cleartext-ports": "fail",
@@ -42,7 +45,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 23,
+    "baseline": 20,
     "hardened": 0
   }
 }

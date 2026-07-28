@@ -277,10 +277,122 @@ impl Check for MountOptions {
     }
 }
 
+/// Basenames of setuid-root binaries that ship legitimately setuid on mainstream
+/// distros (Debian/Ubuntu + RHEL family). Matched by basename so the usr-merge
+/// split (`/bin/su` vs `/usr/bin/su`) and per-distro path layout don't matter.
+/// Anything setuid *not* on this list is surfaced for a human to confirm - an
+/// unexpected setuid-root binary is a classic privilege-escalation / persistence
+/// vector. Kept deliberately conservative: better to ask about a rare-but-benign
+/// one than to silently pass a planted backdoor.
+const KNOWN_SUID_BINARIES: &[&str] = &[
+    // Password / identity management.
+    "su",
+    "sudo",
+    "passwd",
+    "chsh",
+    "chfn",
+    "newgrp",
+    "gpasswd",
+    "expiry",
+    "chage",
+    // Mount helpers.
+    "mount",
+    "umount",
+    "mount.nfs",
+    "mount.cifs",
+    "ntfs-3g",
+    // Desktop / polkit / dbus / fuse helpers.
+    "pkexec",
+    "fusermount",
+    "fusermount3",
+    "dbus-daemon-launch-helper",
+    "polkit-agent-helper-1",
+    // Networking / scheduling / PAM.
+    "ping",
+    "ping6",
+    "at",
+    "crontab",
+    "ssh-keysign",
+    "unix_chkpwd",
+    "pam_timestamp_check",
+    "suexec",
+    // RHEL/Fedora: ships setuid by default (grub2-tools; reports boot success).
+    "grub2-set-bootflag",
+];
+
+/// An unexpected setuid-root binary exists on the root filesystem - an alternate
+/// path to root outside the known-good set. Privileged: the scan runs as root
+/// (`sudo -n find /`) so it can see every directory; a whole-filesystem scan may
+/// exit non-zero on a transient per-path error, which this check tolerates.
+pub struct SuidBinaries;
+
+impl Check for SuidBinaries {
+    fn id(&self) -> &'static str {
+        "kernel-suid-binaries"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Kernel
+    }
+    fn title(&self) -> &'static str {
+        "Unexpected setuid-root binaries"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Confirm each is intended; remove the setuid bit from anything unexpected: \
+         chmod u-s <path>. Unknown setuid-root binaries are a common privilege-escalation vector."
+    }
+    fn command(&self) -> &'static str {
+        "sudo -n find / -xdev -perm -4000 -type f"
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn tolerate_nonzero_exit(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let unexpected: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter(|path| {
+                let base = path.rsplit('/').next().unwrap_or(path);
+                !KNOWN_SUID_BINARIES.contains(&base)
+            })
+            .collect();
+        if unexpected.is_empty() {
+            Outcome::pass("No unexpected setuid-root binaries.")
+        } else {
+            Outcome::fail(format!(
+                "Unexpected setuid-root binaries: {}.",
+                unexpected.join(", ")
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
     use super::*;
+
+    #[test]
+    fn suid_binaries() {
+        assert!(SuidBinaries.privileged());
+        assert!(SuidBinaries.tolerate_nonzero_exit());
+        // All known-good SUID binaries (usr-merge and non-merged paths) -> pass.
+        let ok = "/usr/bin/sudo\n/usr/bin/passwd\n/bin/su\n/usr/lib/openssh/ssh-keysign\n";
+        assert_eq!(SuidBinaries.evaluate(ok).status, Status::Pass);
+        // Empty scan -> pass.
+        assert_eq!(SuidBinaries.evaluate("").status, Status::Pass);
+        // An unknown setuid binary -> fail, naming the path.
+        let bad = "/usr/bin/sudo\n/tmp/.hidden/rootshell\n";
+        let out = SuidBinaries.evaluate(bad);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("/tmp/.hidden/rootshell"));
+    }
 
     #[test]
     fn aslr() {

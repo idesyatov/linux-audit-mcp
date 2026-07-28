@@ -366,6 +366,28 @@ pub fn parse_ps(output: &str) -> Vec<ProcInfo> {
         .collect()
 }
 
+/// Count OOM-killer kills in `dmesg` output. The kernel logs one
+/// `Out of memory: Kill process ...` / `Out of memory: Killed process ...` line
+/// per victim (wording varies by kernel version), so counting that prefix counts
+/// the kills. Matching `Out of memory: Kill` covers both spellings.
+pub fn parse_oom_kills(output: &str) -> usize {
+    output
+        .lines()
+        .filter(|l| l.contains("Out of memory: Kill"))
+        .count()
+}
+
+/// Count zombie (defunct) processes in `ps -eo stat --no-headers` output. Each
+/// line is a process's STAT field; the state is the leading letter, so `Z`
+/// (optionally with modifiers like `Z+`, `Zl`) marks a zombie. Blank lines are
+/// skipped.
+pub fn parse_zombie_count(output: &str) -> usize {
+    output
+        .lines()
+        .filter(|l| l.trim_start().starts_with('Z'))
+        .count()
+}
+
 /// Cumulative RX/TX counters for one interface, from `/proc/net/dev`: bytes,
 /// packets, errors and drops per direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,6 +711,27 @@ mod tests {
         assert_eq!(p[1].comm, "mysqld");
         assert_eq!(p[1].cpu, 12.3);
         assert_eq!(p[1].mem, 8.4);
+    }
+
+    #[test]
+    fn zombie_count() {
+        let out = "Ss\nR\nS\nZ\nS+\nZ+\nSl\n";
+        assert_eq!(parse_zombie_count(out), 2);
+        // No zombies.
+        assert_eq!(parse_zombie_count("Ss\nR\nS+\n"), 0);
+        assert_eq!(parse_zombie_count(""), 0);
+    }
+
+    #[test]
+    fn oom_kills() {
+        let out = "[12345.6] some driver message\n\
+                   [12346.0] Out of memory: Killed process 4242 (mysqld) total-vm:...\n\
+                   [12347.1] oom-killer: gfp_mask=0x...\n\
+                   [20000.0] Out of memory: Kill process 999 (java) score 500\n";
+        // Two victim lines (both spellings), not the oom-killer invocation line.
+        assert_eq!(parse_oom_kills(out), 2);
+        assert_eq!(parse_oom_kills("clean boot\n"), 0);
+        assert_eq!(parse_oom_kills(""), 0);
     }
 
     #[test]

@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 38 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 41 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -195,6 +195,7 @@ host = "203.0.113.10"           # required — hostname or IP
 port = 22                        # default 22
 user = "auditor"                 # default "auditor" (unprivileged)
 identity_file = "~/.ssh/id_ed25519"   # SSH private key; ~ is expanded
+known_hosts = "~/.ssh/known_hosts"    # optional: pin the host key (UserKnownHostsFile)
 strict_host_key = "accept-new"   # yes | accept-new (default) | no
 connect_timeout_secs = 10        # default 10
 command_timeout_secs = 30        # default 30
@@ -321,11 +322,11 @@ docker run --rm \
 | `--check`      | Run only these check ids (repeatable or comma-separated).           |
 | `--domain`     | Run only these domains (ssh, accounts, kernel, firewall, updates, services, logging). |
 | `--skip`       | Skip these check ids (wins over `--check`).                         |
-| `--format`     | `text` (default) \| `json`.                                         |
+| `--format`     | `text` (default) \| `json` \| `sarif` (SARIF 2.1.0, for GitHub code scanning). |
 | `--config`     | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |
 | `--fail-on`    | Exit 2 if any failed check is ≥ this severity. `off` disables. Default `high`. |
 | `--fail-under` | Exit 2 if the total score is below this value (0–100).              |
-| `--diff`       | After the report, show what changed vs this target's previous audit (text only). |
+| `--diff`       | After the report, show what changed vs this target's previous audit (rendered as text, or JSON with `--format json`). |
 | `--no-store`   | Don't append this audit to the on-disk history.                     |
 
 Every audit is recorded per target (append-only JSONL, next to the health history;
@@ -384,6 +385,13 @@ append-only JSONL file per target — one line per run — so you can inspect tr
 ```bash
 linux-audit-mcp history --target web              # text table (or --format json)
 linux-audit-mcp history --target web --limit 50
+```
+
+Audits are recorded the same way (`<alias>.audit.jsonl`); `audit-history` prints
+the recorded **score trend** (time, profile, score, pass/fail/skip/error counts):
+
+```bash
+linux-audit-mcp audit-history --target web         # or --format json
 ```
 
 | Option     | Description                                                          |
@@ -524,6 +532,15 @@ container before use, so the plain `:ro` mount **just works** — you don't mana
 key permissions. `HOME=/tmp` (also set in the image) gives that copy and
 `known_hosts` a writable home.
 
+**Pin by digest** for a reproducible, tamper-evident deploy (a tag can move; a
+digest can't). Resolve the current digest, then run that exact image:
+
+```bash
+docker pull ghcr.io/idesyatov/linux-audit-mcp:latest
+docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/idesyatov/linux-audit-mcp:latest
+# → ghcr.io/idesyatov/linux-audit-mcp@sha256:...  ← use this in place of :latest
+```
+
 Optional hardening flags — add to `docker run` (or the args list):
 
 ```text
@@ -547,7 +564,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-38 checks; each reads one read-only command and applies the tool/OpenSSH default
+41 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -571,6 +588,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | accounts  | `accounts-system-login-shells` | Low      | a system account (UID < 1000) has a login shell |
 | accounts  | `accounts-shadow-empty-password` 🔑 | Critical | an account has an empty `/etc/shadow` password |
 | accounts  | `accounts-shadow-weak-hash` 🔑 | Medium   | an account's password hash is MD5 or legacy DES |
+| accounts  | `accounts-shadow-password-expiry` 🔑 | Low | a login account's password never expires (max-age unset or > 365d) |
 | kernel    | `kernel-aslr`                  | Medium   | `randomize_va_space` ≠ 2                    |
 | kernel    | `kernel-tcp-syncookies`        | Low      | `tcp_syncookies` ≠ 1                        |
 | kernel    | `kernel-rp-filter`             | Low      | `rp_filter` not 1/2                         |
@@ -583,10 +601,12 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | kernel    | `kernel-suid-dumpable`         | Medium   | `fs.suid_dumpable` ≠ 0                      |
 | kernel    | `kernel-unprivileged-bpf`      | Medium   | `unprivileged_bpf_disabled` not 1/2        |
 | kernel    | `kernel-mount-options`         | Medium   | `/tmp`, `/var/tmp` or `/dev/shm` (when separately mounted) lacks `nosuid`/`nodev`/`noexec` |
+| kernel    | `kernel-suid-binaries` 🔑      | Medium   | a setuid-root binary outside the known-good set exists on the root filesystem |
 | firewall  | `firewall-enabled`             | High     | no firewalld/ufw/nftables enabled          |
 | firewall  | `firewall-nft-default-deny` 🔑 | Medium   | live `nft` input hook accepts everything (defers if the host uses the iptables-legacy backend) |
-| updates   | `updates-security-pending`     | Medium   | pending security updates (apt; errors on non-apt) |
-| updates   | `updates-security-pending-dnf` | Medium   | pending security updates (dnf/RHEL; errors on non-dnf) |
+| firewall  | `firewall-iptables-default-deny` 🔑 | Medium   | live iptables-legacy `INPUT` chain accepts everything (defers to nft when legacy tables are empty) |
+| updates   | `updates-security-pending`     | Medium   | pending security updates (apt; skipped on non-apt hosts) |
+| updates   | `updates-security-pending-dnf` | Medium   | pending security updates (dnf/RHEL; skipped on non-dnf hosts) |
 | updates   | `updates-auto-updates`         | Low      | no automatic security-update service on    |
 | services  | `services-cleartext-ports`     | Medium   | telnet/ftp/r-services listening            |
 | services  | `services-rpcbind`             | Low      | `rpcbind` enabled                          |
@@ -630,7 +650,7 @@ Grant the auditor **passwordless sudo for exactly these commands** — never `AL
 On the target (`visudo -f /etc/sudoers.d/linux-audit`):
 
 ```
-auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset, /usr/bin/docker ps -a, /usr/bin/podman ps -a
+auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/bin/find / -xdev -perm -4000 -type f, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset, /usr/sbin/iptables -S, /usr/bin/dmesg, /usr/bin/docker ps -a, /usr/bin/podman ps -a
 ```
 
 Skipped checks are excluded from the score (like `error`); the report shows them
@@ -663,6 +683,8 @@ reported `UNKNOWN` and never gates.
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |
+| `health-zombies`      | `ps -eo stat --no-headers`                 | any zombie (defunct) process → Warn (≥ `zombie_crit` → Crit); a leaking parent isn't reaping children |
+| `health-oom` 🔑       | `sudo -n dmesg`                            | any OOM-killer kill since boot → Warn; privileged-only, else n/a |
 | `health-containers`   | `docker ps -a`, `podman ps -a` (`sudo -n …` on privileged targets) | a `Restarting` (crash-loop) container → Crit; `unhealthy` → Warn; no runtime → n/a |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |

@@ -52,6 +52,11 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // still can't create files. Portable (`-P`) columns match `df -P`.
     "df -Pi",
     "ps -eo pid,comm,pcpu,pmem --sort=-pcpu",
+    // Process state codes only (`stat`), one per line, no header. The STAT field's
+    // leading letter is the state; `Z` marks a zombie (a dead child not reaped by
+    // its parent). Kept separate from the hot-process `ps` so the zombie count and
+    // the top-CPU/MEM listing can't break each other.
+    "ps -eo stat --no-headers",
     "ss -s",
     // System-wide open file descriptors: `allocated  unused  max`. Nearing the max
     // means "too many open files" for new sockets/files.
@@ -88,6 +93,17 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // `privileged = true`; the operator grants NOPASSWD sudo for exactly these).
     // `sudo -n` never prompts - it fails fast if not permitted.
     "sudo -n cat /etc/shadow",
+    // Kernel ring buffer (health): the OOM-killer logs `Out of memory: Killed
+    // process ...` here. Root-only when `kernel.dmesg_restrict=1` (the common
+    // default), hence the `sudo -n` form. `dmesg` with no args only prints.
+    "sudo -n dmesg",
+    // SUID-root binaries. `-xdev` keeps the scan on the root filesystem (never
+    // descending into other mounts or pseudo-filesystems like /proc, /sys), so it
+    // is bounded and can't hang on a network mount. A transient per-path error
+    // sets a non-zero exit; the SUID check opts into tolerating that (partial
+    // stdout is still authoritative for what was found). Read-only: `find`
+    // without an action only prints.
+    "sudo -n find / -xdev -perm -4000 -type f",
     // Effective SSH config: `sshd -T` dumps the *resolved* directives (compiled
     // defaults + Match blocks). On an opted-in target its output supersedes the
     // file read for every ssh-domain check, making them authoritative.
@@ -95,6 +111,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // Live nftables ruleset: the effective inbound firewall posture (ufw,
     // firewalld and raw nft all render here). Root-only; read-only dump.
     "sudo -n nft list ruleset",
+    // Live iptables-legacy ruleset (`-S` = dump rules, no counters). Covers hosts
+    // on the xtables backend that `nft list ruleset` can't see. Root-only; read-only.
+    "sudo -n iptables -S",
     // Container state as root: on many hosts `docker`/`podman` need root or
     // docker-group membership, so the unprivileged `docker ps -a` returns nothing
     // and the health metric goes blind. On an opted-in target these authoritative

@@ -3,9 +3,14 @@
 use std::collections::BTreeMap;
 
 use super::parse::{
-    parse_keyword_map, parse_passwd, shadow_empty_password_accounts, shadow_weak_hash_accounts,
+    parse_keyword_map, parse_passwd, shadow_empty_password_accounts,
+    shadow_nonexpiring_password_accounts, shadow_weak_hash_accounts,
 };
 use super::{Check, Domain, Outcome, Severity};
+
+/// Password max-age (days) above which a per-account password is treated as
+/// effectively non-expiring; mirrors the `login.defs` policy in [`PassMaxDays`].
+const MAX_PASSWORD_AGE_DAYS: u32 = 365;
 
 const PASSWD_CMD: &str = "getent passwd";
 const LOGIN_DEFS_CMD: &str = "cat /etc/login.defs";
@@ -307,6 +312,51 @@ impl Check for ShadowWeakHash {
     }
 }
 
+/// A login-capable account's password never expires (its `/etc/shadow` max-age
+/// field is unset or beyond the policy limit), so a leaked or weak password is
+/// never forced to rotate. Privileged: `/etc/shadow` is root-only, read via
+/// `sudo`. Complements [`PassMaxDays`] (which only sees the `login.defs` default
+/// applied to new passwords, not each account's actual max-age).
+pub struct ShadowPasswordExpiry;
+
+impl Check for ShadowPasswordExpiry {
+    fn id(&self) -> &'static str {
+        "accounts-shadow-password-expiry"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Accounts
+    }
+    fn title(&self) -> &'static str {
+        "Password never expires"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Set a maximum password age on login accounts: chage -M 365 <user> (or lock \
+         password login entirely where key-based auth is used: passwd -l <user>)."
+    }
+    fn command(&self) -> &'static str {
+        SHADOW_CMD
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let flagged = shadow_nonexpiring_password_accounts(output, MAX_PASSWORD_AGE_DAYS);
+        if flagged.is_empty() {
+            Outcome::pass("All login accounts have a password-expiry limit.")
+        } else {
+            let list = flagged
+                .iter()
+                .map(|(user, max)| format!("{user} (max {max})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Outcome::fail(format!("Accounts whose password never expires: {list}."))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -394,5 +444,19 @@ mod tests {
         let out = ShadowWeakHash.evaluate(weak);
         assert_eq!(out.status, Status::Fail);
         assert!(out.detail.contains("legacy (MD5)"));
+    }
+
+    #[test]
+    fn shadow_password_expiry() {
+        assert!(ShadowPasswordExpiry.privileged());
+        // Every usable-password account has a sane max-age -> pass.
+        let ok = "root:$6$x$hash:19700:0:90:7:::\n\
+                  daemon:*:19700:0:99999:7:::\n";
+        assert_eq!(ShadowPasswordExpiry.evaluate(ok).status, Status::Pass);
+        // A never-expiring usable password -> fail, naming the account.
+        let bad = "root:$6$x$hash:19700:0:99999:7:::\n";
+        let out = ShadowPasswordExpiry.evaluate(bad);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("root"));
     }
 }

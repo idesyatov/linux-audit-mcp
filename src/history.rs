@@ -543,6 +543,74 @@ impl AuditDiff {
     }
 }
 
+/// Human-readable audit history: one row per snapshot (time, profile, score, and
+/// the pass/fail/skip/error breakdown).
+pub fn audit_text(alias: &str, snaps: &[AuditSnapshot]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if snaps.is_empty() {
+        let _ = writeln!(out, "No audit history recorded for '{alias}'.");
+        return out;
+    }
+    let _ = writeln!(
+        out,
+        "Audit history of '{alias}' ({} snapshot(s)):",
+        snaps.len()
+    );
+    let _ = writeln!(
+        out,
+        "  {:<20} {:<9} {:>5}  {:>4} {:>4} {:>4} {:>4}",
+        "time (UTC)", "profile", "score", "pass", "fail", "skip", "err"
+    );
+    for s in snaps {
+        let (mut pass, mut fail, mut skip, mut err) = (0u32, 0u32, 0u32, 0u32);
+        for st in s.findings.values() {
+            match st {
+                Status::Pass => pass += 1,
+                Status::Fail => fail += 1,
+                Status::Skipped => skip += 1,
+                Status::Error => err += 1,
+            }
+        }
+        let prof = match s.profile {
+            Profile::Baseline => "baseline",
+            Profile::Hardened => "hardened",
+        };
+        let _ = writeln!(
+            out,
+            "  {:<20} {:<9} {:>5}  {:>4} {:>4} {:>4} {:>4}",
+            fmt_utc(s.ts),
+            prof,
+            s.total,
+            pass,
+            fail,
+            skip,
+            err
+        );
+    }
+    out
+}
+
+/// Machine-readable audit history: `{ target, kind: "audit-history", count, snapshots }`.
+pub fn audit_json(alias: &str, snaps: &[AuditSnapshot]) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "target": alias,
+        "kind": "audit-history",
+        "count": snaps.len(),
+        "snapshots": snaps,
+    }))
+}
+
+/// Machine-readable audit diff: `{ target, kind: "audit-diff", diff }`. `diff` is
+/// `null` when there is no prior snapshot to compare against.
+pub fn audit_diff_json(alias: &str, diff: Option<&AuditDiff>) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "target": alias,
+        "kind": "audit-diff",
+        "diff": diff,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +751,46 @@ mod tests {
         let same = audit_diff(&prev, &prev);
         assert!(same.is_unchanged());
         assert!(audit_diff_text("web", &same).contains("no changes"));
+    }
+
+    #[test]
+    fn audit_history_text_and_json_render() {
+        let snaps = vec![
+            asnap(1000, 80, &[("a", Status::Pass), ("b", Status::Fail)]),
+            asnap(2000, 90, &[("a", Status::Pass), ("b", Status::Pass)]),
+        ];
+        let text = audit_text("web", &snaps);
+        assert!(
+            text.contains("Audit history of 'web' (2 snapshot(s))"),
+            "{text}"
+        );
+        assert!(text.contains("80") && text.contains("90"), "{text}");
+
+        let json = audit_json("web", &snaps).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["kind"], "audit-history");
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["snapshots"].as_array().unwrap().len(), 2);
+
+        // Empty history.
+        assert!(audit_text("web", &[]).contains("No audit history"));
+    }
+
+    #[test]
+    fn audit_diff_json_renders_and_handles_no_prior() {
+        let prev = asnap(100, 79, &[("x", Status::Pass)]);
+        let cur = asnap(200, 61, &[("x", Status::Fail)]);
+        let d = audit_diff(&prev, &cur);
+        let json = audit_diff_json("web", Some(&d)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["kind"], "audit-diff");
+        assert_eq!(v["diff"]["score_to"], 61);
+        assert_eq!(v["diff"]["regressions"].as_array().unwrap().len(), 1);
+
+        // No prior snapshot -> diff is null.
+        let none = audit_diff_json("web", None).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&none).unwrap();
+        assert!(v2["diff"].is_null());
     }
 
     #[test]

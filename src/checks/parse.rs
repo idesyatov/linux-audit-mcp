@@ -121,6 +121,49 @@ pub fn shadow_weak_hash_accounts(output: &str) -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// From `/etc/shadow`, accounts with a usable password whose maximum password
+/// age (field 4) is unset or greater than `max_days` - the password effectively
+/// never has to be rotated. Returns `(user, max_display)` where `max_display` is
+/// `"unset"` for an empty field or the number (annotated `(never)` for the
+/// 99999 sentinel). Locked (`!`, `*`), empty-password and malformed/short rows
+/// are excluded, so only accounts that can actually log in with a password are
+/// considered. Complements [`crate::checks::accounts::PassMaxDays`], which only
+/// sees the `login.defs` default applied to *new* passwords.
+pub fn shadow_nonexpiring_password_accounts(output: &str, max_days: u32) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split(':').collect();
+            if f.len() < 5 {
+                return None;
+            }
+            let user = f[0].trim();
+            let hash = f[1];
+            // Only usable-password accounts: skip empty (no password), locked
+            // (`!`) and disabled (`*`) entries - those can't password-authenticate.
+            if user.is_empty() || hash.is_empty() || hash.starts_with(['!', '*']) {
+                return None;
+            }
+            let max_raw = f[4].trim();
+            if max_raw.is_empty() {
+                return Some((user.to_string(), "unset".to_string()));
+            }
+            match max_raw.parse::<u32>() {
+                Ok(days) if days > max_days => {
+                    // 99999 is the conventional "never expires" sentinel.
+                    let disp = if days >= 99999 {
+                        format!("{days} (never)")
+                    } else {
+                        days.to_string()
+                    };
+                    Some((user.to_string(), disp))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Parse `sysctl -a` output (`key = value` lines) into a map.
 pub fn parse_sysctl(output: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -272,6 +315,56 @@ pub fn nft_input_policy(output: &str) -> NftInput {
     }
 }
 
+/// Classify the INPUT-chain posture of `iptables -S` output, reusing
+/// [`NftInput`]. This covers the iptables-legacy backend that
+/// [`nft_input_policy`] cannot see. `iptables -S` prints one directive per line:
+/// a policy `-P INPUT DROP|ACCEPT` and rules `-A INPUT ... -j TARGET`. Mirroring
+/// the lenient nft classifier, the chain "denies" if its policy is `DROP`/`REJECT`
+/// or any INPUT rule has a `DROP`/`REJECT` verdict (targeted or catch-all - we
+/// would rather not false-fail a real firewall). Targets stay UPPERCASE (unlike
+/// nft), so tokens are matched as-is.
+///
+/// A subtlety guards against a false positive: an nft-native host still lists the
+/// legacy tables with a bare `-P INPUT ACCEPT` and **no** INPUT rules. That is
+/// inconclusive (nft is likely the active backend), so a bare accept policy with
+/// zero INPUT rules is treated as [`NftInput::NoInputHook`] (defer), not
+/// `AcceptAll`. `AcceptAll` is reported only when the legacy INPUT chain is
+/// actually populated (≥1 `-A INPUT` rule) yet nothing denies. Empty output →
+/// [`NftInput::NoRuleset`].
+pub fn iptables_input_policy(output: &str) -> NftInput {
+    if output.trim().is_empty() {
+        return NftInput::NoRuleset;
+    }
+    let mut denies = false;
+    let mut input_rules = 0usize;
+    for line in output.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        // Policy: `-P INPUT DROP|ACCEPT`.
+        if t.len() >= 3 && t[0] == "-P" && t[1] == "INPUT" {
+            if matches!(t[2], "DROP" | "REJECT") {
+                denies = true;
+            }
+            continue;
+        }
+        // Rule targeting the INPUT chain: `-A INPUT ... -j DROP|REJECT`.
+        if t.len() >= 2 && t[0] == "-A" && t[1] == "INPUT" {
+            input_rules += 1;
+            if t.iter().any(|&x| x == "DROP" || x == "REJECT") {
+                denies = true;
+            }
+        }
+    }
+    if denies {
+        NftInput::DefaultDeny
+    } else if input_rules > 0 {
+        // Legacy INPUT chain is populated but nothing denies -> open.
+        NftInput::AcceptAll
+    } else {
+        // Only a bare policy (or unrelated chains): inconclusive -> defer.
+        NftInput::NoInputHook
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +436,28 @@ mod tests {
         );
         // Strong hashes, locked and empty accounts are not weak-hash findings.
         assert!(shadow_weak_hash_accounts("root:$6$x$h:19000::::::\n").is_empty());
+    }
+
+    #[test]
+    fn shadow_nonexpiring_passwords() {
+        let out = "root:$6$abc$hash:19700:0:99999:7:::\n\
+                   alice:$6$def$hash:19700:0:90:7:::\n\
+                   bob:$6$ghi$hash:19700:0::7:::\n\
+                   carol:$6$jkl$hash:19700:0:500:7:::\n\
+                   daemon:*:19700:0:99999:7:::\n\
+                   sshd:!:19700:0:99999:7:::\n\
+                   nopass::19700:0:99999:7:::\n";
+        let flagged = shadow_nonexpiring_password_accounts(out, 365);
+        // root (99999 -> never), bob (unset), carol (500 > 365); NOT alice (90),
+        // NOT locked/disabled/empty accounts.
+        assert_eq!(
+            flagged,
+            vec![
+                ("root".to_string(), "99999 (never)".to_string()),
+                ("bob".to_string(), "unset".to_string()),
+                ("carol".to_string(), "500".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -435,5 +550,48 @@ mod tests {
                    \t}\n\
                    }\n";
         assert_eq!(nft_input_policy(out), NftInput::NoInputHook);
+    }
+
+    #[test]
+    fn iptables_policy_drop_is_default_deny() {
+        let out = "-P INPUT DROP\n\
+                   -P FORWARD DROP\n\
+                   -P OUTPUT ACCEPT\n\
+                   -A INPUT -i lo -j ACCEPT\n\
+                   -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT\n";
+        assert_eq!(iptables_input_policy(out), NftInput::DefaultDeny);
+    }
+
+    #[test]
+    fn iptables_accept_policy_with_final_drop_is_default_deny() {
+        // Default-accept policy but a catch-all DROP rule at the end.
+        let out = "-P INPUT ACCEPT\n\
+                   -A INPUT -p tcp --dport 22 -j ACCEPT\n\
+                   -A INPUT -j DROP\n";
+        assert_eq!(iptables_input_policy(out), NftInput::DefaultDeny);
+    }
+
+    #[test]
+    fn iptables_accept_policy_no_deny_is_accept_all() {
+        let out = "-P INPUT ACCEPT\n\
+                   -P OUTPUT ACCEPT\n\
+                   -A INPUT -p tcp --dport 22 -j ACCEPT\n";
+        assert_eq!(iptables_input_policy(out), NftInput::AcceptAll);
+    }
+
+    #[test]
+    fn iptables_no_input_chain_and_empty() {
+        assert_eq!(iptables_input_policy(""), NftInput::NoRuleset);
+        // Only FORWARD/OUTPUT mentioned -> nothing guards INPUT.
+        let out = "-P FORWARD DROP\n-P OUTPUT ACCEPT\n-A FORWARD -j DROP\n";
+        assert_eq!(iptables_input_policy(out), NftInput::NoInputHook);
+    }
+
+    #[test]
+    fn iptables_bare_accept_policy_defers() {
+        // nft-native host: legacy tables list a bare accept policy with no INPUT
+        // rules -> inconclusive, defer (not a false AcceptAll).
+        let out = "-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n";
+        assert_eq!(iptables_input_policy(out), NftInput::NoInputHook);
     }
 }

@@ -18,6 +18,7 @@
     "accounts-system-login-shells": "pass",
     "accounts-shadow-empty-password": "pass",
     "accounts-shadow-weak-hash": "pass",
+    "accounts-shadow-password-expiry": "fail",
     "kernel-aslr": "pass",
     "kernel-tcp-syncookies": "pass",
     "kernel-rp-filter": "pass",
@@ -30,10 +31,12 @@
     "kernel-suid-dumpable": "pass",
     "kernel-unprivileged-bpf": "fail",
     "kernel-mount-options": "fail",
+    "kernel-suid-binaries": "pass",
     "firewall-enabled": "fail",
     "firewall-nft-default-deny": "skipped",
+    "firewall-iptables-default-deny": "pass",
     "updates-security-pending": "fail",
-    "updates-security-pending-dnf": "error",
+    "updates-security-pending-dnf": "skipped",
     "updates-auto-updates": "fail",
     "services-cleartext-ports": "pass",
     "services-rpcbind": "pass",
@@ -42,7 +45,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 43,
-    "hardened": 28
+    "baseline": 42,
+    "hardened": 27
   }
 }

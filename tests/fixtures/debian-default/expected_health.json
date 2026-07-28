@@ -13,6 +13,8 @@
     "health-iowait": "warn",
     "health-connections": "ok",
     "health-failed-units": "warn",
+    "health-zombies": "ok",
+    "health-oom": "ok",
     "health-containers": "warn"
   },
   "overall": "warn"

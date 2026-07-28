@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::audit::Outputs;
+use crate::audit::{CmdError, Outputs};
 use crate::ssh::{SshConfig, SshError};
 use parse::ProcInfo;
 
@@ -39,6 +39,10 @@ const PIDS: &str = "cat /proc/loadavg /proc/sys/kernel/pid_max";
 const SOCKSTAT: &str =
     "cat /proc/net/sockstat /proc/sys/net/ipv4/tcp_mem /proc/sys/net/ipv4/tcp_max_orphans /proc/sys/net/ipv4/tcp_max_tw_buckets";
 const PS: &str = "ps -eo pid,comm,pcpu,pmem --sort=-pcpu";
+/// Process state codes (`stat`), one per line. A leading `Z` marks a zombie.
+/// Separate from [`PS`] so the zombie count and the hot-process listing are
+/// independently parsed (a change to one can't regress the other).
+const PS_STAT: &str = "ps -eo stat --no-headers";
 const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
 /// single-shot command whose last row is the current delta (parsed in [`evaluate`]).
@@ -55,6 +59,10 @@ const PODMAN_PS: &str = "podman ps -a";
 /// a `privileged` target these are tried first (see [`container_command`]).
 const SUDO_DOCKER_PS: &str = "sudo -n docker ps -a";
 const SUDO_PODMAN_PS: &str = "sudo -n podman ps -a";
+/// Kernel ring buffer, for OOM-killer events. Privileged-only (`dmesg_restrict`
+/// is on by default), so it is sent solely to `privileged` targets; elsewhere the
+/// metric reports `Unknown`.
+const OOM_DMESG: &str = "sudo -n dmesg";
 /// Sampled twice (not single-shot) to derive throughput and error rate, so it is
 /// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
 /// [`evaluate`].
@@ -75,9 +83,11 @@ const SINGLE_SHOT: &[&str] = &[
     PIDS,
     SOCKSTAT,
     PS,
+    PS_STAT,
     SS,
     VMSTAT,
     SYSTEMCTL_FAILED,
+    OOM_DMESG,
     DOCKER_PS,
     PODMAN_PS,
 ];
@@ -97,9 +107,11 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     PIDS,
     SOCKSTAT,
     PS,
+    PS_STAT,
     SS,
     VMSTAT,
     SYSTEMCTL_FAILED,
+    OOM_DMESG,
     DOCKER_PS,
     PODMAN_PS,
     SUDO_DOCKER_PS,
@@ -285,6 +297,10 @@ pub struct Thresholds {
     /// escalate to `Crit`. `0` disables the escalation (failed units stay `Warn`),
     /// which is the default - a single benign oneshot failure shouldn't be `Crit`.
     pub failed_units_crit: u32,
+    /// Zombie (defunct) processes: any zombie is a `Warn`; this many or more
+    /// escalate to `Crit`. `0` disables the escalation (zombies stay `Warn`),
+    /// which is the default - a transient zombie mid-reap shouldn't be `Crit`.
+    pub zombie_crit: u32,
     /// How many hot processes to list per resource.
     pub top_n: usize,
 }
@@ -320,6 +336,7 @@ impl Default for Thresholds {
             listen_overflow_crit_pps: 10.0,
             net_sample_secs: 1,
             failed_units_crit: 0,
+            zombie_crit: 0,
             top_n: 5,
         }
     }
@@ -701,6 +718,83 @@ fn failed_units_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
     }
 }
 
+/// Recent OOM-killer events from the kernel log. When memory is exhausted the
+/// kernel kills a process to survive; that a service was OOM-killed is a
+/// zero-config "something went badly wrong" signal even if the host looks fine
+/// now. Any kill since boot → `Warn`. Privileged (`sudo -n dmesg`): on a
+/// non-opted-in host the log is uncollected and the metric is `Unknown` (never
+/// gates). `numeric` is the kill count, for history/anomaly baselining.
+fn oom_metric(outputs: &Outputs) -> Metric {
+    const ID: &str = "health-oom";
+    const TITLE: &str = "OOM-killer events";
+    let Some(text) = out(outputs, OOM_DMESG) else {
+        return unknown(
+            ID,
+            TITLE,
+            "kernel log unavailable (needs privileged sudo -n dmesg)",
+        );
+    };
+    let n = parse::parse_oom_kills(text);
+    let status = if n == 0 {
+        HealthStatus::Ok
+    } else {
+        HealthStatus::Warn
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: if n == 0 {
+            "no OOM kills".to_string()
+        } else {
+            format!("{n} OOM kill(s) since boot")
+        },
+        detail: if n == 0 {
+            "no out-of-memory kills in the kernel log".to_string()
+        } else {
+            format!("{n} process(es) killed by the OOM-killer (kernel log)")
+        },
+        numeric: Some(n as f64),
+    }
+}
+
+/// Zombie (defunct) processes: a dead child whose parent never reaped it. A few
+/// transient zombies are normal, but a growing count means a parent process is
+/// leaking children (it isn't calling `wait()`), which eventually exhausts the
+/// PID table. `numeric` is the count, for history/anomaly baselining. Missing
+/// `ps` output → `Unknown`.
+fn zombie_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-zombies";
+    const TITLE: &str = "Zombie processes";
+    let Some(text) = out(outputs, PS_STAT) else {
+        return unknown(ID, TITLE, "ps unavailable");
+    };
+    let n = parse::parse_zombie_count(text);
+    let status = if n == 0 {
+        HealthStatus::Ok
+    } else if thr.zombie_crit > 0 && n as u32 >= thr.zombie_crit {
+        HealthStatus::Crit
+    } else {
+        HealthStatus::Warn
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: if n == 0 {
+            "no zombies".to_string()
+        } else {
+            format!("{n} zombie process(es)")
+        },
+        detail: if n == 0 {
+            "no defunct processes".to_string()
+        } else {
+            format!("{n} process(es) in Z (defunct) state - a parent isn't reaping children")
+        },
+        numeric: Some(n as f64),
+    }
+}
+
 /// Container liveness across docker and podman: a zero-config signal that a
 /// containerised service is broken. A `Restarting` container (crash loop) is
 /// `Crit`; an `unhealthy` one (failing healthcheck) is `Warn`. Neither runtime
@@ -971,6 +1065,8 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(iowait_metric(outputs, thr));
     metrics.push(network_metric(outputs));
     metrics.push(failed_units_metric(outputs, thr));
+    metrics.push(zombie_metric(outputs, thr));
+    metrics.push(oom_metric(outputs));
     metrics.push(containers_metric(outputs));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
@@ -1027,6 +1123,12 @@ pub async fn collect(
 ) -> Result<HealthReport, SshError> {
     let mut outputs: Outputs = HashMap::new();
     for &cmd in SINGLE_SHOT {
+        // The OOM probe reads the kernel log via `sudo -n dmesg`; only send it to
+        // an opted-in target. On a non-privileged host it is left uncollected, so
+        // `oom_metric` reports Unknown (never gates) - mirroring privileged checks.
+        if cmd == OOM_DMESG && !privileged {
+            continue;
+        }
         let value = if cmd == DOCKER_PS || cmd == PODMAN_PS {
             // Container probes may need privilege; the result is stored under the
             // canonical key (`docker ps -a`) so evaluate()/parsing stay unaware of
@@ -1039,16 +1141,16 @@ pub async fn collect(
                 None => match fallback {
                     Some(plain) => run_single(ssh, plain)
                         .await?
-                        .ok_or_else(|| "container runtime unavailable".to_string()),
-                    None => Err("container runtime unavailable".to_string()),
+                        .ok_or_else(|| CmdError::other("container runtime unavailable")),
+                    None => Err(CmdError::other("container runtime unavailable")),
                 },
             }
         } else {
             match ssh.run(cmd).await {
                 Ok(out) => Ok(out.stdout),
-                Err(SshError::RemoteCommand { code, stderr }) => {
-                    Err(format!("remote command failed (code {code:?}): {stderr}"))
-                }
+                Err(SshError::RemoteCommand { code, stderr, .. }) => Err(CmdError::other(format!(
+                    "remote command failed (code {code:?}): {stderr}"
+                ))),
                 Err(host_level) => return Err(host_level),
             }
         };
