@@ -227,6 +227,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(firewall::NftDefaultDeny), // privileged (sudo)
         // updates
         Box::new(updates::SecurityUpdatesPending),
+        Box::new(updates::SecurityUpdatesPendingDnf),
         Box::new(updates::AutoUpdatesEnabled),
         // services
         Box::new(services::CleartextPorts),

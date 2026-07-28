@@ -1,0 +1,2 @@
+RLSA-2024:1234 Important/Sec. kernel-4.18.0-553.el8.x86_64
+RLSA-2024:5678 Moderate/Sec.  openssl-1.1.1k-12.el8.x86_64

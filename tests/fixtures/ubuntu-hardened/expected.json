@@ -32,6 +32,7 @@
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "skipped",
     "updates-security-pending": "pass",
+    "updates-security-pending-dnf": "error",
     "updates-auto-updates": "pass",
     "services-cleartext-ports": "pass",
     "services-rpcbind": "pass",

@@ -1,13 +1,15 @@
-//! Updates-domain checks (`apt-get -s upgrade`).
+//! Updates-domain checks: pending security updates (apt and dnf) and whether
+//! automatic updates are enabled.
 //!
-//! Debian/Ubuntu only. On non-apt hosts the command errors and the audit
-//! records this as an `Error` finding (not a pass/fail). Broader per-distro
-//! coverage (dnf) is not implemented yet.
+//! `apt`/`dnf` are per-distro: each errors on the other family's host, and the
+//! audit records that as an `Error` finding (excluded from the score), so a
+//! Debian host is judged by the apt check and a RHEL host by the dnf check.
 
 use super::parse::{parse_unit_files, service_enabled};
 use super::{Check, Domain, Outcome, Severity, UNITS_CMD};
 
 const APT_SIM_CMD: &str = "apt-get -s upgrade";
+const DNF_SEC_CMD: &str = "dnf -q updateinfo list security";
 
 /// Pending security updates (simulated apt upgrade lists `Inst` from -security).
 pub struct SecurityUpdatesPending;
@@ -36,6 +38,47 @@ impl Check for SecurityUpdatesPending {
         let count = output
             .lines()
             .filter(|l| l.starts_with("Inst ") && l.to_ascii_lowercase().contains("security"))
+            .count();
+        if count == 0 {
+            Outcome::pass("No pending security updates.")
+        } else {
+            Outcome::fail(format!("{count} pending security update(s)."))
+        }
+    }
+}
+
+/// Pending security updates on RHEL/dnf hosts (`dnf updateinfo list security`).
+/// Each output line is one security advisory affecting one package (`ADVISORY
+/// Severity/Sec. package-nvr`); `-q` strips headers, and the command exits 0 with
+/// empty output when none are pending. On an apt host the command errors, so the
+/// audit records an `Error` finding instead of a pass/fail.
+pub struct SecurityUpdatesPendingDnf;
+
+impl Check for SecurityUpdatesPendingDnf {
+    fn id(&self) -> &'static str {
+        "updates-security-pending-dnf"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Updates
+    }
+    fn title(&self) -> &'static str {
+        "Pending security updates (dnf)"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Apply security updates: dnf upgrade --security."
+    }
+    fn command(&self) -> &'static str {
+        DNF_SEC_CMD
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // Each advisory row has at least three fields (advisory, severity, package);
+        // blank lines have none, so this counts exactly the pending advisories.
+        let count = output
+            .lines()
+            .filter(|l| l.split_whitespace().count() >= 3)
             .count();
         if count == 0 {
             Outcome::pass("No pending security updates.")
@@ -104,6 +147,22 @@ mod tests {
         assert_eq!(SecurityUpdatesPending.evaluate(none).status, Status::Pass);
         // One of the two Inst lines is from -Security.
         assert_eq!(SecurityUpdatesPending.evaluate(some).status, Status::Fail);
+    }
+
+    #[test]
+    fn security_updates_dnf() {
+        // Empty output (also the exit-0 "none pending" case) -> pass.
+        assert_eq!(SecurityUpdatesPendingDnf.evaluate("").status, Status::Pass);
+        assert_eq!(
+            SecurityUpdatesPendingDnf.evaluate("\n\n").status,
+            Status::Pass
+        );
+        // Two security advisory rows -> fail (count 2).
+        let some = "RLSA-2024:1234 Important/Sec. kernel-4.18.0-553.el8.x86_64\n\
+                    RLSA-2024:5678 Moderate/Sec.  openssl-1.1.1k-12.el8.x86_64\n";
+        let out = SecurityUpdatesPendingDnf.evaluate(some);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains('2'), "{}", out.detail);
     }
 
     #[test]

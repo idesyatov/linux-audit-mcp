@@ -33,6 +33,7 @@
     "firewall-enabled": "fail",
     "firewall-nft-default-deny": "skipped",
     "updates-security-pending": "fail",
+    "updates-security-pending-dnf": "error",
     "updates-auto-updates": "fail",
     "services-cleartext-ports": "pass",
     "services-rpcbind": "pass",

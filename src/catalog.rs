@@ -39,6 +39,9 @@ pub const READONLY_COMMANDS: &[&str] = &[
     "systemctl list-unit-files --type=service --no-pager",
     // `-s` (simulate) performs no actions and needs no root - read-only.
     "apt-get -s upgrade",
+    // RHEL/dnf equivalent: list pending security advisories. Read-only, exits 0
+    // (unlike `check-update`, which exits 100 when updates exist).
+    "dnf -q updateinfo list security",
     "uname -a",
     // Operational health probes: all unprivileged, read-only snapshots.
     "uptime",
