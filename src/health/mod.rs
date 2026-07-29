@@ -47,9 +47,9 @@ const SS: &str = "ss -s";
 /// `1 2` = one 1-second sample; vmstat does its own timing, so this is a normal
 /// single-shot command whose last row is the current delta (parsed in [`evaluate`]).
 const VMSTAT: &str = "vmstat 1 2";
-/// Failed systemd services - a zero-config "something is broken" signal.
-const SYSTEMCTL_FAILED: &str =
-    "systemctl list-units --type=service --state=failed --no-legend --no-pager";
+/// Failed systemd units of any type (service/timer/mount/socket/...) - a
+/// zero-config "something is broken" signal.
+const SYSTEMCTL_FAILED: &str = "systemctl list-units --state=failed --no-legend --no-pager";
 /// Container state via docker and podman (either may be absent). `-a` lists all
 /// states so a crash-looping container caught mid-backoff is still seen.
 const DOCKER_PS: &str = "docker ps -a";
@@ -739,7 +739,7 @@ fn network_metric(outputs: &Outputs) -> Metric {
 /// history is picked up by the anomaly layer.
 fn failed_units_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
     const ID: &str = "health-failed-units";
-    const TITLE: &str = "Failed services";
+    const TITLE: &str = "Failed systemd units";
     let Some(text) = out(outputs, SYSTEMCTL_FAILED) else {
         return unknown(ID, TITLE, "systemctl unavailable");
     };
@@ -762,7 +762,7 @@ fn failed_units_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
             format!("{n} failed unit(s)")
         },
         detail: if units.is_empty() {
-            "no systemd services in failed state".to_string()
+            "no systemd units in failed state".to_string()
         } else {
             units.join(", ")
         },
@@ -2049,19 +2049,21 @@ mod tests {
     #[test]
     fn failed_units_status() {
         let thr = Thresholds::default();
-        const CMD: &str =
-            "systemctl list-units --type=service --state=failed --no-legend --no-pager";
+        const CMD: &str = SYSTEMCTL_FAILED;
         // No failed units (empty output) -> Ok.
         assert_eq!(
             failed_units_metric(&outputs(&[(CMD, "")]), &thr).status,
             HealthStatus::Ok
         );
-        // One failed unit -> Warn (default: crit escalation disabled).
-        let one = "nginx.service loaded failed failed A web server\n";
-        let m = failed_units_metric(&outputs(&[(CMD, one)]), &thr);
-        assert_eq!(m.status, HealthStatus::Warn);
-        assert!(m.detail.contains("nginx.service"));
-        assert_eq!(m.numeric, Some(1.0));
+        // A failed non-service unit (timer/mount) counts too, not just services.
+        let mixed = "nginx.service loaded failed failed A web server\n\
+                     backup.timer loaded failed failed Daily backup\n\
+                     data.mount loaded failed failed /data\n";
+        let m = failed_units_metric(&outputs(&[(CMD, mixed)]), &thr);
+        assert_eq!(m.status, HealthStatus::Warn); // crit escalation off by default
+        assert!(m.detail.contains("backup.timer"));
+        assert!(m.detail.contains("data.mount"));
+        assert_eq!(m.numeric, Some(3.0));
         // With a crit threshold, enough failed units escalate to Crit.
         let strict = Thresholds {
             failed_units_crit: 2,

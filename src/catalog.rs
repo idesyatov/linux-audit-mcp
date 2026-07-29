@@ -97,9 +97,11 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",
-    // Failed systemd services: a zero-config "something is broken" signal.
+    // Failed systemd units of ANY type: a zero-config "something is broken" signal.
+    // No `--type` filter, so a failed .service, .timer (a schedule stopped), .mount
+    // (a filesystem didn't mount) or .socket (a listener is down) all surface.
     // `--no-legend`/`--no-pager` give a clean, script-parseable list.
-    "systemctl list-units --type=service --state=failed --no-legend --no-pager",
+    "systemctl list-units --state=failed --no-legend --no-pager",
     // Container state: crash-looping (`Restarting`) or failing-healthcheck
     // (`unhealthy`) containers are a zero-config "a service is broken" signal.
     // `-a` lists all states, so a container caught mid-backoff is still seen. Both

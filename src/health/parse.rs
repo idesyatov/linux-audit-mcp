@@ -819,12 +819,20 @@ mod tests {
         // Empty output = no failed units.
         assert!(parse_failed_units("").is_empty());
         assert!(parse_failed_units("\n  \n").is_empty());
-        // Plain lines and a leading status bullet are both handled.
+        // Plain lines and a leading status bullet are both handled; any unit TYPE
+        // (service/timer/mount/socket) is captured, not just services.
         let out = "nginx.service    loaded failed failed A high performance web server\n\
-                   ● docker.service loaded failed failed Docker Application Container Engine\n";
+                   ● docker.service loaded failed failed Docker Application Container Engine\n\
+                   backup.timer     loaded failed failed Daily backup\n\
+                   data.mount       loaded failed failed /data\n";
         assert_eq!(
             parse_failed_units(out),
-            vec!["nginx.service".to_string(), "docker.service".to_string()]
+            vec![
+                "nginx.service".to_string(),
+                "docker.service".to_string(),
+                "backup.timer".to_string(),
+                "data.mount".to_string(),
+            ]
         );
         // A stray non-unit line (no dot) is skipped.
         assert!(parse_failed_units("garbage line here\n").is_empty());

@@ -703,7 +703,7 @@ reported `UNKNOWN` and never gates.
 | `health-tcp-mem`      | `cat /proc/net/sockstat` + `tcp_mem`/`tcp_max_orphans`/`tcp_max_tw_buckets` | worst of TCP memory / orphan / TIME_WAIT usage ≥ `tcp_warn_pct`/`tcp_crit_pct` of its ceiling (connections dropped/throttled) |
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
-| `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |
+| `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd unit — service, **timer** (a schedule stopped), **mount** (a filesystem didn't mount) or socket → Warn (≥ `failed_units_crit` → Crit) |
 | `health-zombies`      | `ps -eo stat --no-headers`                 | any zombie (defunct) process → Warn (≥ `zombie_crit` → Crit); a leaking parent isn't reaping children |
 | `health-oom` 🔑       | `sudo -n dmesg`                            | any OOM-killer kill since boot → Warn; privileged-only, else n/a |
 | `health-kernel-events` 🔑 | `sudo -n dmesg`                        | curated kernel-log failure signatures since boot — FS/block-I/O errors, conntrack/neighbour-table overflows → Warn; hard faults (panic/BUG/oops/soft-lockup/hung-task/MCE) → Crit; privileged-only (shares the `dmesg` read), else n/a |
