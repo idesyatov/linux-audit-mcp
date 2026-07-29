@@ -18,6 +18,7 @@
     "health-kernel-events": "ok",
     "health-clock-sync": "warn",
     "health-reboot-required": "ok",
+    "health-fs-readonly": "crit",
     "health-containers": "crit"
   },
   "overall": "crit"

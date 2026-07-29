@@ -18,6 +18,7 @@
     "health-kernel-events": "warn",
     "health-clock-sync": "ok",
     "health-reboot-required": "warn",
+    "health-fs-readonly": "ok",
     "health-containers": "warn"
   },
   "overall": "warn"

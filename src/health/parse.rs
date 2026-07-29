@@ -482,6 +482,39 @@ pub fn parse_reboot_required(output: &str) -> bool {
     output.lines().any(|l| l.trim() == "reboot-required")
 }
 
+/// Writable on-disk filesystems. Only these are flagged when mounted read-only:
+/// they are normally read-write, so `ro` means the kernel remounted them after
+/// errors. Read-only-*by-design* filesystems (squashfs - every snap is a `ro`
+/// loopback squashfs; iso9660/erofs/cramfs - images/appliances) are deliberately
+/// absent so they never false-positive.
+const WRITABLE_DISK_FS: &[&str] = &[
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "jfs", "reiserfs",
+];
+
+/// On-disk read-write filesystems currently mounted read-only, from `/proc/mounts`:
+/// `(mountpoint, device)`. The kernel remounts a filesystem `ro` after I/O or
+/// metadata errors, so a normally-writable disk filesystem (ext*/xfs/btrfs, see
+/// [`WRITABLE_DISK_FS`]) on a `/dev/*` device mounted `ro` almost always means a
+/// failing disk / ongoing outage (writes now fail). Pseudo/virtual filesystems
+/// (proc/sysfs/tmpfs/overlay) and read-only-by-design ones (squashfs snaps,
+/// iso9660) are excluded. Each `/proc/mounts` line is `device mountpoint fstype
+/// options ...`.
+pub fn parse_readonly_mounts(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 4 {
+                return None;
+            }
+            let (device, mountpoint, fstype, opts) = (f[0], f[1], f[2], f[3]);
+            let read_only = opts.split(',').any(|o| o == "ro");
+            (device.starts_with("/dev/") && WRITABLE_DISK_FS.contains(&fstype) && read_only)
+                .then(|| (mountpoint.to_string(), device.to_string()))
+        })
+        .collect()
+}
+
 /// Whether the system clock is NTP-synchronized, from `timedatectl show`
 /// (`NTPSynchronized=yes/no`). `None` if the field is absent (no systemd-timesyncd
 /// / not reported).
@@ -1000,6 +1033,24 @@ mod tests {
         assert!(parse_reboot_required(run));
         assert!(!parse_reboot_required("systemd\nlock\nsshd.pid\n"));
         assert!(!parse_reboot_required(""));
+    }
+
+    #[test]
+    fn readonly_mounts_flags_block_devices_only() {
+        let out = "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n\
+                   /dev/mapper/rl-root / xfs rw,relatime,seclabel 0 0\n\
+                   /dev/sdb1 /data ext4 ro,relatime 0 0\n\
+                   tmpfs /dev/shm tmpfs ro,nosuid,nodev 0 0\n\
+                   /dev/loop0 /snap/lxd/29351 squashfs ro,nodev,relatime 0 0\n\
+                   overlay /var/lib/docker/overlay2/x/merged overlay ro,relatime 0 0\n";
+        let ro = parse_readonly_mounts(out);
+        // Only the writable-disk ro filesystem is flagged: tmpfs/overlay excluded,
+        // the rw root is not, and a `ro` squashfs snap (loopback, read-only by
+        // design) must NOT false-positive.
+        assert_eq!(ro, vec![("/data".to_string(), "/dev/sdb1".to_string())]);
+        // All writable -> empty.
+        assert!(parse_readonly_mounts("/dev/sda1 / ext4 rw,relatime 0 0\n").is_empty());
+        assert!(parse_readonly_mounts("").is_empty());
     }
 
     #[test]

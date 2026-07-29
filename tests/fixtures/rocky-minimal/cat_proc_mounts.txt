@@ -4,3 +4,4 @@ devtmpfs /dev devtmpfs rw,nosuid,seclabel,size=1878088k,nr_inodes=469522,mode=75
 tmpfs /run tmpfs rw,nosuid,nodev,seclabel,size=385208k,mode=755 0 0
 /dev/mapper/rl-root / xfs rw,relatime,seclabel,attr2,inode64 0 0
 tmpfs /dev/shm tmpfs rw,nosuid,nodev,seclabel 0 0
+/dev/mapper/rl-data /data xfs ro,relatime,seclabel,attr2,inode64 0 0

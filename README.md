@@ -715,6 +715,7 @@ reported `UNKNOWN` and never gates.
 | `health-cert-expiry`  | `openssl x509 -noout -enddate` per configured `cert_paths` | days until the **nearest** configured TLS cert expires ≤ `cert_expiry_warn_days`/`cert_expiry_crit_days` (expired → Crit); n/a if no `cert_paths` configured. Certs must be readable by the SSH user |
 | `health-clock-sync`   | `timedatectl show`                         | `NTPSynchronized=no` → Warn (clock unsynced — breaks TLS windows / logs / time-based auth); n/a if not reported |
 | `health-reboot-required` | `ls /run`                               | Debian/Ubuntu `/run/reboot-required` present → Warn (kernel/libraries updated, host running the old code). Debian-family only |
+| `health-fs-readonly`  | `cat /proc/mounts`                         | a normally-writable disk filesystem (ext*/xfs/btrfs…) mounted **read-only** → Crit (the kernel remounts `ro` after disk errors — writes silently fail). Read-only-by-design filesystems (squashfs snaps, iso9660) and pseudo/overlay/tmpfs are excluded |
 
 The text report's headline is a **diagnosis**: the overall status followed by a
 compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0 err

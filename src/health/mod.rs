@@ -83,6 +83,10 @@ const TIMEDATECTL: &str = "timedatectl show";
 /// `/run` listing (`health-reboot-required`); the Debian/Ubuntu `reboot-required`
 /// flag file lives here. `/run` always exists, so this exits 0. Unprivileged.
 const LS_RUN: &str = "ls /run";
+/// Mount table (`health-fs-readonly`); a `/dev/*` filesystem mounted `ro` means the
+/// kernel remounted it read-only after disk errors. Already in the catalog (shared
+/// with the `kernel-mount-options` security check). Unprivileged.
+const PROC_MOUNTS: &str = "cat /proc/mounts";
 
 /// Commands snapped exactly once per snapshot.
 const SINGLE_SHOT: &[&str] = &[
@@ -105,6 +109,7 @@ const SINGLE_SHOT: &[&str] = &[
     PODMAN_PS,
     TIMEDATECTL,
     LS_RUN,
+    PROC_MOUNTS,
 ];
 
 /// Every read-only command the health snapshot may issue (each must be in the
@@ -137,6 +142,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     SNMP,
     TIMEDATECTL,
     LS_RUN,
+    PROC_MOUNTS,
 ];
 
 /// The wire command for a container probe: on a `privileged` target the `sudo -n`
@@ -1314,6 +1320,49 @@ fn reboot_required_metric(outputs: &Outputs) -> Metric {
     }
 }
 
+/// Normally-writable disk filesystems remounted read-only, from `/proc/mounts`. The
+/// kernel remounts a filesystem `ro` after I/O/metadata errors, so an ext*/xfs/btrfs
+/// filesystem mounted `ro` is a strong sign of a failing disk / ongoing outage -
+/// writes silently fail. Read-only-by-design filesystems (squashfs snaps, iso9660)
+/// are excluded (see [`parse::parse_readonly_mounts`]). Any → `Crit` (naming the
+/// mounts); none → `Ok`. Absent output → `Unknown`.
+fn fs_readonly_metric(outputs: &Outputs) -> Metric {
+    const ID: &str = "health-fs-readonly";
+    const TITLE: &str = "Read-only filesystems";
+    let Some(text) = out(outputs, PROC_MOUNTS) else {
+        return unknown(ID, TITLE, "/proc/mounts unavailable");
+    };
+    let ro = parse::parse_readonly_mounts(text);
+    if ro.is_empty() {
+        return Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Ok,
+            value: "all filesystems writable".to_string(),
+            detail: "no block-device filesystem mounted read-only".to_string(),
+            numeric: Some(0.0),
+        };
+    }
+    let mounts = ro
+        .iter()
+        .map(|(mp, _)| mp.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let detail = ro
+        .iter()
+        .map(|(mp, dev)| format!("{mp} ({dev})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: HealthStatus::Crit,
+        value: format!("read-only: {mounts} (disk errors? kernel remounted ro)"),
+        detail,
+        numeric: Some(ro.len() as f64),
+    }
+}
+
 /// Days until the nearest configured TLS certificate expires. `certs` pairs each
 /// configured path with its `openssl x509 -noout -enddate` output (or `None` if the
 /// read failed). Reports the minimum days-remaining across all readable certs; at or
@@ -1403,6 +1452,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(kernel_events_metric(outputs));
     metrics.push(clock_sync_metric(outputs));
     metrics.push(reboot_required_metric(outputs));
+    metrics.push(fs_readonly_metric(outputs));
     metrics.push(containers_metric(outputs));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
@@ -1885,6 +1935,28 @@ mod tests {
         assert_eq!(m("systemd\nlock\n").status, HealthStatus::Ok);
         assert_eq!(
             reboot_required_metric(&outputs(&[])).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn fs_readonly_flags_block_device_ro() {
+        // A /dev-backed ro filesystem -> Crit, naming the mountpoint.
+        let ro = fs_readonly_metric(&outputs(&[(
+            "cat /proc/mounts",
+            "/dev/sda1 / ext4 rw,relatime 0 0\n/dev/sdb1 /data ext4 ro,relatime 0 0\n",
+        )]));
+        assert_eq!(ro.status, HealthStatus::Crit);
+        assert!(ro.value.contains("/data"), "{}", ro.value);
+        // All writable (pseudo ro fs ignored) -> Ok.
+        let ok = fs_readonly_metric(&outputs(&[(
+            "cat /proc/mounts",
+            "/dev/sda1 / ext4 rw,relatime 0 0\ntmpfs /dev/shm tmpfs ro,nosuid 0 0\n",
+        )]));
+        assert_eq!(ok.status, HealthStatus::Ok);
+        // No output -> Unknown.
+        assert_eq!(
+            fs_readonly_metric(&outputs(&[])).status,
             HealthStatus::Unknown
         );
     }
