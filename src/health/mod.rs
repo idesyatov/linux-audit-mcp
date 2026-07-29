@@ -1114,7 +1114,7 @@ fn net_listen_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds) -> Metr
 /// NAT/firewall/proxy dropping connections that the count-vs-max gauge only warns
 /// is *near* full. The rate gates on `early_drop + insert_failed`; the generic
 /// `drop` counter ticks routinely on high-churn hosts even when the table is far
-/// from full (seen on the mtproto proxies), so it's shown as context but never
+/// from full (seen on busy proxy hosts), so it's shown as context but never
 /// gates. A healthy host holds the gated rate at 0; the since-boot totals answer
 /// "were there drops already this boot?". Missing/unparseable stat (or module not
 /// loaded) reports `Unknown`.
@@ -1865,7 +1865,7 @@ mod tests {
         assert_eq!(m.numeric, Some(10.0));
 
         // A big generic `drop` delta with NO early_drop/insert_failed change ->
-        // Ok (the noisy-drop case that WARN'd mt3 in live-verify).
+        // Ok (the noisy-drop case that WARN'd a host in live-verify).
         let noisy = format!("{hdr}00000064 00000000 00010000 00000002 00000001\n");
         let nm = net_conntrack_drops_metric(&s1, &noisy, 1.0, &thr);
         assert_eq!(nm.status, HealthStatus::Ok);
@@ -2167,10 +2167,10 @@ mod tests {
         );
         // A restarting (crash-looping) container -> Crit, named in detail. Podman
         // path also works.
-        let looping = format!("{hdr}c img x x Restarting (2) 5 seconds ago 443/tcp mtproxy\n");
+        let looping = format!("{hdr}c img x x Restarting (2) 5 seconds ago 443/tcp proxy\n");
         let m = containers_metric(&outputs(&[("podman ps -a", &looping)]));
         assert_eq!(m.status, HealthStatus::Crit);
-        assert!(m.detail.contains("mtproxy"));
+        assert!(m.detail.contains("proxy"));
     }
 
     #[test]

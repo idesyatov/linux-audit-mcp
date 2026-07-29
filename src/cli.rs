@@ -525,9 +525,9 @@ mod tests {
             }
             _ => panic!("expected audit subcommand"),
         }
-        let g = Cli::try_parse_from(["linux-audit-mcp", "audit", "--group", "mtproto"]).unwrap();
+        let g = Cli::try_parse_from(["linux-audit-mcp", "audit", "--group", "prod"]).unwrap();
         match g.command {
-            Some(Command::Audit(a)) => assert_eq!(a.group.as_deref(), Some("mtproto")),
+            Some(Command::Audit(a)) => assert_eq!(a.group.as_deref(), Some("prod")),
             _ => panic!("expected audit subcommand"),
         }
         // --diff --against N selects an older baseline.
@@ -688,9 +688,9 @@ mod tests {
             _ => panic!("expected history subcommand"),
         }
         // --group is accepted too.
-        let g = Cli::try_parse_from(["linux-audit-mcp", "history", "--group", "mtproto"]).unwrap();
+        let g = Cli::try_parse_from(["linux-audit-mcp", "history", "--group", "prod"]).unwrap();
         match g.command {
-            Some(Command::History(a)) => assert_eq!(a.group.as_deref(), Some("mtproto")),
+            Some(Command::History(a)) => assert_eq!(a.group.as_deref(), Some("prod")),
             _ => panic!("expected history subcommand"),
         }
         // exactly one of --target/--group is required.
@@ -701,7 +701,7 @@ mod tests {
             "--target",
             "web",
             "--group",
-            "mtproto"
+            "prod"
         ])
         .is_err());
     }

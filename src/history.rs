@@ -733,20 +733,20 @@ mod tests {
     #[test]
     fn group_json_wraps_each_host() {
         let entries = vec![
-            ("mt1".to_string(), vec![snap(1, 0.1), snap(2, 0.2)]),
-            ("mt2".to_string(), vec![snap(1, 0.3)]),
+            ("web1".to_string(), vec![snap(1, 0.1), snap(2, 0.2)]),
+            ("web2".to_string(), vec![snap(1, 0.3)]),
         ];
-        let out = group_json("mtproto", &entries).unwrap();
+        let out = group_json("prod", &entries).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["group"], "mtproto");
+        assert_eq!(v["group"], "prod");
         assert_eq!(v["kind"], "health-history-group");
         assert_eq!(v["hosts"].as_array().unwrap().len(), 2);
-        assert_eq!(v["hosts"][0]["target"], "mt1");
+        assert_eq!(v["hosts"][0]["target"], "web1");
         assert_eq!(v["hosts"][0]["count"], 2);
         // text form names the group and every host.
-        let t = group_text("mtproto", &entries);
-        assert!(t.contains("group 'mtproto'"));
-        assert!(t.contains("mt1") && t.contains("mt2"));
+        let t = group_text("prod", &entries);
+        assert!(t.contains("group 'prod'"));
+        assert!(t.contains("web1") && t.contains("web2"));
     }
 
     #[test]
@@ -916,11 +916,11 @@ mod tests {
     fn round_trips_containers_and_failed_units() {
         let d = TempDir::new();
         let mut s = snap(1, 0.5);
-        s.containers.insert("mtproxy".to_string(), 172_800);
+        s.containers.insert("proxy".to_string(), 172_800);
         s.failed_units.push("nginx.service".to_string());
         record_in(d.path(), "web", &s, 0).unwrap();
         let got = read_recent_in(d.path(), "web", 10).unwrap();
-        assert_eq!(got[0].containers.get("mtproxy"), Some(&172_800));
+        assert_eq!(got[0].containers.get("proxy"), Some(&172_800));
         assert_eq!(got[0].failed_units, vec!["nginx.service".to_string()]);
     }
 

@@ -885,14 +885,14 @@ mod tests {
                    a1b2c3d4e5f6   nginx:latest   \"...\"     2 days ago    Up 2 days                    80/tcp  web\n\
                    b2c3d4e5f6a7   redis:7        \"...\"     2 days ago    Up 2 days (healthy)          6379/tcp cache\n\
                    c3d4e5f6a7b8   postgres:16    \"...\"     3 days ago    Up 3 days (unhealthy)        5432/tcp db\n\
-                   d4e5f6a7b8c9   proxy:latest   \"...\"     3 months ago  Restarting (2) 5 seconds ago 443/tcp mtproxy\n\
+                   d4e5f6a7b8c9   proxy:latest   \"...\"     3 months ago  Restarting (2) 5 seconds ago 443/tcp proxy\n\
                    e5f6a7b8c9d0   old:latest     \"...\"     1 week ago    Exited (0) 3 days ago                stopped\n";
         let p = parse_container_problems(out);
         assert_eq!(
             p,
             vec![
                 ("db".to_string(), "unhealthy"),
-                ("mtproxy".to_string(), "restarting"),
+                ("proxy".to_string(), "restarting"),
             ]
         );
         // Header-only / empty output -> nothing.
@@ -909,7 +909,7 @@ mod tests {
                    a1b2c3d4e5f6   nginx:latest   \"...\"     2 days ago    Up 2 days                    80/tcp  web\n\
                    b2c3d4e5f6a7   redis:7        \"...\"     2 hours ago   Up About an hour (healthy)   6379/tcp cache\n\
                    c3d4e5f6a7b8   busy:16        \"...\"     1 min ago     Up 40 seconds                5432/tcp fresh\n\
-                   d4e5f6a7b8c9   proxy:latest   \"...\"     3 months ago  Restarting (2) 5 seconds ago 443/tcp mtproxy\n\
+                   d4e5f6a7b8c9   proxy:latest   \"...\"     3 months ago  Restarting (2) 5 seconds ago 443/tcp proxy\n\
                    e5f6a7b8c9d0   old:latest     \"...\"     1 week ago    Exited (0) 3 days ago                stopped\n";
         let up = parse_container_uptimes(out);
         assert_eq!(
@@ -921,7 +921,7 @@ mod tests {
             ]
         );
         // Restarting/Exited/Created have no stable uptime and are skipped.
-        assert!(!up.iter().any(|(n, _)| n == "mtproxy" || n == "stopped"));
+        assert!(!up.iter().any(|(n, _)| n == "proxy" || n == "stopped"));
         // "Less than a second" -> 0, still tracked so a later restart is a drop.
         let sub = "CONTAINER ID x\nx img c cr Up Less than a second p tiny\n";
         assert_eq!(parse_container_uptimes(sub), vec![("tiny".to_string(), 0)]);

@@ -24,6 +24,39 @@ pub(crate) struct AuditServer {
     tool_router: ToolRouter<Self>,
 }
 
+/// Which content block(s) a tool returns. Defaults to `Text`: the human-readable
+/// summary alone keeps the payload small, and the (much larger) structured JSON
+/// is opt-in via `json`/`both`.
+enum OutputFormat {
+    Text,
+    Json,
+    Both,
+}
+
+impl OutputFormat {
+    /// Parse the optional `format` argument; `None`/empty means the `Text` default.
+    fn parse(raw: Option<&str>) -> Result<Self, McpError> {
+        match raw {
+            None | Some("") | Some("text") => Ok(Self::Text),
+            Some("json") => Ok(Self::Json),
+            Some("both") => Ok(Self::Both),
+            Some(other) => Err(McpError::invalid_params(
+                format!("unknown format {other:?} (expected \"text\", \"json\" or \"both\")"),
+                None,
+            )),
+        }
+    }
+
+    /// Assemble the tool result's content blocks for the chosen format.
+    fn blocks(&self, text: String, json: String) -> Vec<ContentBlock> {
+        match self {
+            Self::Text => vec![ContentBlock::text(text)],
+            Self::Json => vec![ContentBlock::text(json)],
+            Self::Both => vec![ContentBlock::text(text), ContentBlock::text(json)],
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub(crate) struct RunAuditParams {
     #[serde(default)]
@@ -40,6 +73,13 @@ pub(crate) struct RunAuditParams {
                               overrides the target's configured profile"
     )]
     profile: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Output format: \"text\" (default, human-readable summary), \
+                       \"json\" (structured only), or \"both\". The JSON is much larger; \
+                       request it only when you need the structured data."
+    )]
+    format: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -52,6 +92,13 @@ pub(crate) struct InspectLoadParams {
         description = "Group name to snapshot every member of (or `all`); provide this or `target`"
     )]
     group: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Output format: \"text\" (default, human-readable summary), \
+                       \"json\" (structured only), or \"both\". The JSON is much larger; \
+                       request it only when you need the structured data."
+    )]
+    format: Option<String>,
 }
 
 /// Expand a `target`/`group` selection into aliases plus the group name (if any).
@@ -93,12 +140,14 @@ impl AuditServer {
 
     #[tool(
         description = "Run the read-only security audit against a configured target (`target`) \
-                       or every member of a group (`group`, or \"all\"). Returns text + JSON."
+                       or every member of a group (`group`, or \"all\"). Returns a human-readable \
+                       summary by default; pass `format` for JSON."
     )]
     async fn run_audit(
         &self,
         Parameters(params): Parameters<RunAuditParams>,
     ) -> Result<CallToolResult, McpError> {
+        let format = OutputFormat::parse(params.format.as_deref())?;
         let cfg = config::load()
             .map_err(|e| McpError::internal_error(format!("config error: {e}"), None))?;
         let profile_override = match params.profile.as_deref() {
@@ -146,22 +195,21 @@ impl AuditServer {
             ),
         };
 
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(text),
-            ContentBlock::text(json),
-        ]))
+        Ok(CallToolResult::success(format.blocks(text, json)))
     }
 
     #[tool(
         description = "Take a read-only operational-health snapshot (load, memory, disk, hot \
                        processes, connections, network throughput) of a target (`target`) or \
                        every member of a group (`group`, or \"all\"). Reported separately from \
-                       the security audit; it never affects the security score."
+                       the security audit; it never affects the security score. Returns a \
+                       human-readable summary by default; pass `format` for JSON."
     )]
     async fn inspect_load(
         &self,
         Parameters(params): Parameters<InspectLoadParams>,
     ) -> Result<CallToolResult, McpError> {
+        let format = OutputFormat::parse(params.format.as_deref())?;
         let cfg = config::load()
             .map_err(|e| McpError::internal_error(format!("config error: {e}"), None))?;
         let (aliases, group) = select(&cfg, params.target, params.group)?;
@@ -202,10 +250,7 @@ impl AuditServer {
             ),
         };
 
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(text),
-            ContentBlock::text(json),
-        ]))
+        Ok(CallToolResult::success(format.blocks(text, json)))
     }
 }
 
@@ -238,4 +283,41 @@ pub(crate) async fn serve() -> anyhow::Result<()> {
 
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_format_parse_defaults_to_text_and_rejects_junk() {
+        assert!(matches!(
+            OutputFormat::parse(None).unwrap(),
+            OutputFormat::Text
+        ));
+        assert!(matches!(
+            OutputFormat::parse(Some("")).unwrap(),
+            OutputFormat::Text
+        ));
+        assert!(matches!(
+            OutputFormat::parse(Some("text")).unwrap(),
+            OutputFormat::Text
+        ));
+        assert!(matches!(
+            OutputFormat::parse(Some("json")).unwrap(),
+            OutputFormat::Json
+        ));
+        assert!(matches!(
+            OutputFormat::parse(Some("both")).unwrap(),
+            OutputFormat::Both
+        ));
+        assert!(OutputFormat::parse(Some("xml")).is_err());
+    }
+
+    #[test]
+    fn output_format_blocks_count_matches_choice() {
+        assert_eq!(OutputFormat::Text.blocks("t".into(), "j".into()).len(), 1);
+        assert_eq!(OutputFormat::Json.blocks("t".into(), "j".into()).len(), 1);
+        assert_eq!(OutputFormat::Both.blocks("t".into(), "j".into()).len(), 2);
+    }
 }

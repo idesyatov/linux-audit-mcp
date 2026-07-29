@@ -213,30 +213,30 @@ Group hosts to audit or snapshot them all at once. A `[groups.<name>]` lists
 common settings live in one place:
 
 ```toml
-[groups.mtproto]
+[groups.prod]
 user = "root"                         # inherited by every member
 identity_file = "~/.ssh/audit_ed25519"
 profile = "hardened"
-members = ["web", "mt2", "mt3"]
+members = ["web", "web2", "web3"]
 
-[groups.mtproto.health]               # optional group-wide thresholds
+[groups.prod.health]               # optional group-wide thresholds
 la_per_core_warn = 2.0
 
 [targets.web]
 host = "203.0.113.10"                 # only what's unique per host
 
-[targets.mt2]
+[targets.web2]
 host = "203.0.113.11"
 
-[targets.mt3]
+[targets.web3]
 host = "203.0.113.12"
 user = "audit"                        # override just for this host
 ```
 
 Precedence per field: **host value → group value → built-in default**. A host
 inheriting the same field from two groups with different values is a config error
-(set it on the host to disambiguate). Run against a group with `--group mtproto`
-(CLI) or `{ "group": "mtproto" }` (MCP); the implicit **`all`** group is every
+(set it on the host to disambiguate). Run against a group with `--group prod`
+(CLI) or `{ "group": "prod" }` (MCP); the implicit **`all`** group is every
 target. Hosts in a group run **concurrently**, and one unreachable host doesn't
 sink the rest — it's reported as an error line in the group report.
 
@@ -395,7 +395,7 @@ append-only JSONL file per target — one line per run — so you can inspect tr
 ```bash
 linux-audit-mcp history --target web              # text table (or --format json)
 linux-audit-mcp history --target web --limit 50
-linux-audit-mcp history --group mtproto           # every member of the group
+linux-audit-mcp history --group prod           # every member of the group
 ```
 
 Audits are recorded the same way (`<alias>.audit.jsonl`); `audit-history` prints
@@ -403,7 +403,7 @@ the recorded **score trend** (time, profile, score, pass/fail/skip/error counts)
 
 ```bash
 linux-audit-mcp audit-history --target web         # or --format json
-linux-audit-mcp audit-history --group mtproto      # every member of the group
+linux-audit-mcp audit-history --group prod      # every member of the group
 ```
 
 Both `history` and `audit-history` accept `--group <name>` (or `all`) to print the
@@ -514,11 +514,19 @@ host-portable. To harden, insert `"--cap-drop=ALL", "--security-opt=no-new-privi
 instead of `:latest`.
 
 Then ask, e.g. *"Run a hardened audit of `web` and summarise the High findings."*
-The model calls `run_audit { "target": "web" }` and gets the text + JSON report.
+The model calls `run_audit { "target": "web" }` and gets a human-readable report.
 Or *"Is `web` under load right now?"* → `inspect_load { "target": "web" }`, or for
-a whole group *"Check load on all mtproto hosts"* → `inspect_load { "group":
-"mtproto" }`. Both tools accept only a target **alias** or a **group** name from
+a whole group *"Check load on all prod hosts"* → `inspect_load { "group":
+"prod" }`. Both tools accept only a target **alias** or a **group** name from
 the config — a prompt-injected model can't point them at another host or key.
+
+Both tools take an optional **`format`** argument — `"text"` (default, the
+human-readable summary), `"json"` (structured only), or `"both"`. The default is
+text because the JSON is much larger; the model requests `json`/`both` only when
+it needs the structured data. A group **audit** collapses hosts whose result is
+identical into a single block (text) or entry (JSON `groups[]` with an `aliases`
+list), so a homogeneous fleet reports its shared findings once instead of once
+per host.
 
 </details>
 

@@ -273,7 +273,42 @@ pub fn health_group_json(group: &str, outcomes: &[HealthOutcome]) -> serde_json:
     }))
 }
 
-/// Human-readable group audit report: a summary line, then each host's block.
+/// A run of hosts whose audit result is identical (same score + findings, or the
+/// same error message), so a homogeneous fleet renders once instead of per host.
+struct HostGroup<'a> {
+    aliases: Vec<&'a str>,
+    repr: &'a AuditOutcome,
+}
+
+/// Bucket hosts by an alias-independent signature, preserving first-appearance
+/// order (both of the buckets and of the aliases within each). The signature is
+/// the rendered report with an empty alias, so two hosts collapse iff their
+/// profile, score and every finding match; it is used only as a key and never
+/// surfaced. Keeps `Finding`/`Score` free of extra derives.
+fn group_identical(outcomes: &[AuditOutcome]) -> Vec<HostGroup<'_>> {
+    let mut groups: Vec<HostGroup<'_>> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    for o in outcomes {
+        let key = match &o.result {
+            Ok((score, findings)) => crate::report::text("", score, findings),
+            Err(e) => format!("__err__{e}"),
+        };
+        match keys.iter().position(|k| *k == key) {
+            Some(i) => groups[i].aliases.push(o.alias.as_str()),
+            None => {
+                keys.push(key);
+                groups.push(HostGroup {
+                    aliases: vec![o.alias.as_str()],
+                    repr: o,
+                });
+            }
+        }
+    }
+    groups
+}
+
+/// Human-readable group audit report: a summary line, then one block per set of
+/// identical hosts (a homogeneous fleet renders its shared findings once).
 pub fn audit_group_text(group: &str, outcomes: &[AuditOutcome]) -> String {
     use std::fmt::Write;
     let scored: Vec<u8> = outcomes
@@ -291,14 +326,23 @@ pub fn audit_group_text(group: &str, outcomes: &[AuditOutcome]) -> String {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "n/a".into())
     );
-    for o in outcomes {
-        match &o.result {
+    for g in group_identical(outcomes) {
+        let header = if g.aliases.len() > 1 {
+            format!(
+                "{} ({} hosts, identical)",
+                g.aliases.join(", "),
+                g.aliases.len()
+            )
+        } else {
+            g.aliases[0].to_string()
+        };
+        match &g.repr.result {
             Ok((score, findings)) => {
-                let _ = writeln!(out, "=== {} ===", o.alias);
-                out.push_str(&crate::report::text(&o.alias, score, findings));
+                let _ = writeln!(out, "=== {header} ===");
+                out.push_str(&crate::report::text(g.aliases[0], score, findings));
             }
             Err(e) => {
-                let _ = writeln!(out, "=== {} [ERROR] ===\n  {e}", o.alias);
+                let _ = writeln!(out, "=== {header} [ERROR] ===\n  {e}");
             }
         }
     }
@@ -306,19 +350,19 @@ pub fn audit_group_text(group: &str, outcomes: &[AuditOutcome]) -> String {
 }
 
 pub fn audit_group_json(group: &str, outcomes: &[AuditOutcome]) -> serde_json::Result<String> {
-    let hosts: Vec<_> = outcomes
-        .iter()
-        .map(|o| match &o.result {
+    let groups: Vec<_> = group_identical(outcomes)
+        .into_iter()
+        .map(|g| match &g.repr.result {
             Ok((score, findings)) => {
-                json!({ "alias": o.alias, "score": score, "findings": findings })
+                json!({ "aliases": g.aliases, "score": score, "findings": findings })
             }
-            Err(e) => json!({ "alias": o.alias, "error": e }),
+            Err(e) => json!({ "aliases": g.aliases, "error": e }),
         })
         .collect();
     serde_json::to_string_pretty(&json!({
         "group": group,
         "kind": "audit-group",
-        "hosts": hosts,
+        "groups": groups,
     }))
 }
 
@@ -463,18 +507,18 @@ mod tests {
         std::env::set_var("LINUX_AUDIT_DATA_DIR", &dir);
 
         // No history yet -> nothing flagged (first run is silent).
-        let mut first = state_report(&[("mtproxy", 40)], &[], &[]);
+        let mut first = state_report(&[("proxy", 40)], &[], &[]);
         annotate_changes(&mut first);
         assert!(first[0].result.as_ref().unwrap().changes.is_empty());
 
-        // Previous run: mtproxy up 2 days, web up 1 hour, no failed units; conntrack
+        // Previous run: proxy up 2 days, web up 1 hour, no failed units; conntrack
         // pressure at 100, one ext4 error already seen.
         record_in(
             &dir,
             "web",
             &snap_state(
                 1,
-                &[("mtproxy", 172_800), ("web", 3_600)],
+                &[("proxy", 172_800), ("web", 3_600)],
                 &[],
                 &[("conntrack table pressure", 100), ("kernel: ext4 error", 1)],
             ),
@@ -482,10 +526,10 @@ mod tests {
         )
         .unwrap();
 
-        // Now: mtproxy uptime dropped (restarted), web grew (fine), nginx failed;
+        // Now: proxy uptime dropped (restarted), web grew (fine), nginx failed;
         // conntrack pressure rose by 30, ext4 unchanged, a new block-I/O error class.
         let mut cur = state_report(
-            &[("mtproxy", 40), ("web", 7_200)],
+            &[("proxy", 40), ("web", 7_200)],
             &["nginx.service"],
             &[
                 ("conntrack table pressure", 130),
@@ -496,7 +540,7 @@ mod tests {
         annotate_changes(&mut cur);
         let changes = &cur[0].result.as_ref().unwrap().changes;
         assert_eq!(changes.len(), 4, "{changes:?}");
-        assert!(changes.iter().any(|c| c.contains("mtproxy restarted")));
+        assert!(changes.iter().any(|c| c.contains("proxy restarted")));
         assert!(changes
             .iter()
             .any(|c| c.contains("nginx.service newly failed")));
@@ -514,5 +558,80 @@ mod tests {
 
         std::env::remove_var("LINUX_AUDIT_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn audit_host(alias: &str, status: crate::checks::Status) -> AuditOutcome {
+        use crate::checks::{Domain, Severity};
+        let findings = vec![Finding {
+            id: "ssh-x",
+            domain: Domain::Ssh,
+            title: "t",
+            severity: Severity::Low,
+            status,
+            detail: "d".to_string(),
+            recommendation: "fix it",
+        }];
+        let score = scoring::score(&findings, Profile::Baseline);
+        AuditOutcome {
+            alias: alias.to_string(),
+            result: Ok((score, findings)),
+        }
+    }
+
+    #[test]
+    fn audit_group_collapses_identical_hosts() {
+        use crate::checks::Status;
+        // web1 and web2 are identical; web3 differs (a passing check vs a failing one).
+        let outcomes = vec![
+            audit_host("web1", Status::Fail),
+            audit_host("web2", Status::Fail),
+            audit_host("web3", Status::Pass),
+        ];
+
+        // Text: web1+web2 collapse into one block; web3 renders separately.
+        let text = audit_group_text("prod", &outcomes);
+        assert!(
+            text.contains("=== web1, web2 (2 hosts, identical) ==="),
+            "{text}"
+        );
+        assert!(text.contains("=== web3 ==="), "{text}");
+        // The shared findings appear once per block (twice total), not once per host.
+        assert_eq!(text.matches("ssh-x").count(), 2, "{text}");
+
+        // JSON: groups[] with merged aliases, in first-appearance order.
+        let json = audit_group_json("prod", &outcomes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["kind"], "audit-group");
+        let groups = v["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["aliases"], json!(["web1", "web2"]));
+        assert_eq!(groups[1]["aliases"], json!(["web3"]));
+    }
+
+    #[test]
+    fn audit_group_errors_collapse_and_report_separately() {
+        use crate::checks::Status;
+        let outcomes = vec![
+            AuditOutcome {
+                alias: "web1".into(),
+                result: Err("connection refused".into()),
+            },
+            AuditOutcome {
+                alias: "web2".into(),
+                result: Err("connection refused".into()),
+            },
+            audit_host("web3", Status::Fail),
+        ];
+        let text = audit_group_text("prod", &outcomes);
+        assert!(
+            text.contains("=== web1, web2 (2 hosts, identical) [ERROR] ==="),
+            "{text}"
+        );
+        let json = audit_group_json("prod", &outcomes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let groups = v["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["aliases"], json!(["web1", "web2"]));
+        assert_eq!(groups[0]["error"], "connection refused");
     }
 }

@@ -1,2 +1,2 @@
 CONTAINER ID  IMAGE                            COMMAND               CREATED       STATUS                          PORTS                   NAMES
-e5f6a7b8c9d0  telegrammessenger/proxy:latest   /bin/sh -c '/bin/…    3 months ago  Restarting (2) 5 seconds ago    0.0.0.0:443->443/tcp    mtproxy
+e5f6a7b8c9d0  example/proxy:latest   /bin/sh -c '/bin/…    3 months ago  Restarting (2) 5 seconds ago    0.0.0.0:443->443/tcp    proxy

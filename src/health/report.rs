@@ -176,10 +176,10 @@ mod tests {
     fn text_renders_changes_section() {
         let mut r = sample();
         r.changes
-            .push("container mtproxy restarted since last check (up 40s, was up 2d)".to_string());
+            .push("container proxy restarted since last check (up 40s, was up 2d)".to_string());
         let out = text("web", &r);
         assert!(out.contains("CHANGES since last check (1)"));
-        assert!(out.contains("mtproxy restarted"));
+        assert!(out.contains("proxy restarted"));
     }
 
     #[test]

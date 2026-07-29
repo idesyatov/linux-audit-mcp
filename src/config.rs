@@ -402,15 +402,15 @@ mod tests {
     fn group_vars_are_inherited_and_host_overrides() {
         let cfg: Config = toml::from_str(
             r#"
-            [groups.mtproto]
+            [groups.prod]
             user = "root"
             profile = "hardened"
-            members = ["web", "mt2"]
+            members = ["web", "web2"]
 
             [targets.web]
             host = "1.1.1.1"
 
-            [targets.mt2]
+            [targets.web2]
             host = "2.2.2.2"
             user = "audit"
             "#,
@@ -422,10 +422,10 @@ mod tests {
         assert_eq!(web.user, "root");
         assert_eq!(web.profile, Some(Profile::Hardened));
 
-        // mt2 overrides user, still inherits profile.
-        let mt2 = cfg.resolve("mt2").unwrap();
-        assert_eq!(mt2.user, "audit");
-        assert_eq!(mt2.profile, Some(Profile::Hardened));
+        // web2 overrides user, still inherits profile.
+        let web2 = cfg.resolve("web2").unwrap();
+        assert_eq!(web2.user, "audit");
+        assert_eq!(web2.profile, Some(Profile::Hardened));
     }
 
     #[test]
@@ -470,11 +470,11 @@ mod tests {
     fn group_membership_and_validation() {
         let cfg: Config = toml::from_str(
             r#"
-            [groups.mtproto]
-            members = ["web", "mt2"]
+            [groups.prod]
+            members = ["web", "web2"]
             [targets.web]
             host = "1.1.1.1"
-            [targets.mt2]
+            [targets.web2]
             host = "2.2.2.2"
             [targets.other]
             host = "3.3.3.3"
@@ -482,11 +482,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cfg.group_members("mtproto").unwrap(), vec!["web", "mt2"]);
+        assert_eq!(cfg.group_members("prod").unwrap(), vec!["web", "web2"]);
         // implicit `all` = every target, sorted.
         assert_eq!(
             cfg.group_members("all").unwrap(),
-            vec!["mt2", "other", "web"]
+            vec!["other", "web", "web2"]
         );
         assert!(matches!(
             cfg.group_members("nope"),
@@ -517,17 +517,17 @@ mod tests {
         // flattened HostVars - guard that serde still routes them correctly.
         let cfg: Config = toml::from_str(
             r#"
-            [groups.mtproto]
-            members = ["web", "mt2"]
-            [groups.mtproto.health]
+            [groups.prod]
+            members = ["web", "web2"]
+            [groups.prod.health]
             disk_warn_pct = 70
 
             [targets.web]
             host = "1.1.1.1"
 
-            [targets.mt2]
+            [targets.web2]
             host = "2.2.2.2"
-            [targets.mt2.health]
+            [targets.web2.health]
             disk_warn_pct = 60
             "#,
         )
@@ -535,8 +535,8 @@ mod tests {
 
         // web inherits the group's health thresholds.
         assert_eq!(cfg.resolve("web").unwrap().health.disk_warn_pct, 70);
-        // mt2 overrides with its own.
-        assert_eq!(cfg.resolve("mt2").unwrap().health.disk_warn_pct, 60);
+        // web2 overrides with its own.
+        assert_eq!(cfg.resolve("web2").unwrap().health.disk_warn_pct, 60);
     }
 
     #[test]
