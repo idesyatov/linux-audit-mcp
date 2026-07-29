@@ -200,6 +200,7 @@ strict_host_key = "accept-new"   # yes | accept-new (default) | no
 connect_timeout_secs = 10        # default 10
 command_timeout_secs = 30        # default 30
 profile = "hardened"             # optional: baseline (default) | hardened
+cert_paths = ["/etc/letsencrypt/live/example.com/fullchain.pem"]  # optional: TLS certs to watch (health-cert-expiry); must be readable by `user`
 ```
 
 `$LINUX_AUDIT_IDENTITY_FILE`, if set, overrides `identity_file` for every target
@@ -274,6 +275,8 @@ conntrack_drop_warn_pps = 1.0    # conntrack early_drop+insert_failed rate (even
 conntrack_drop_crit_pps = 10.0
 tcp_err_warn_pps = 1.0    # TCP stack pressure rate (events/s): abort-on-mem+prune+rcvq-drop; healthy = 0 (health-tcp-errors)
 tcp_err_crit_pps = 10.0
+cert_expiry_warn_days = 21 # days until nearest configured TLS cert expires → Warn (health-cert-expiry)
+cert_expiry_crit_days = 7  # …→ Crit (or already expired)
 net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat + nf_conntrack + snmp samples
 failed_units_crit = 0     # failed systemd services: any → Warn; ≥ this count → Crit (0 = never Crit)
 zombie_crit = 0           # zombie (defunct) processes: any → Warn; ≥ this count → Crit (0 = never Crit)
@@ -709,6 +712,9 @@ reported `UNKNOWN` and never gates.
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
 | `health-listen-overflows` | `cat /proc/net/netstat` (×2, ~1s apart) | TCP accept-queue overflow rate (events/s) ≥ `listen_overflow_warn_pps`/`_crit_pps` (server not accepting fast enough) |
 | `health-tcp-errors`   | `cat /proc/net/snmp` + `/proc/net/netstat` (×2, ~1s apart) | TCP stack pressure rate (events/s) ≥ `tcp_err_warn_pps`/`tcp_err_crit_pps` — gates on TCPAbortOnMemory+PruneCalled+TCPRcvQDrop (stack shedding connections); retransmit rate shown as context, never gated; since-boot totals as context |
+| `health-cert-expiry`  | `openssl x509 -noout -enddate` per configured `cert_paths` | days until the **nearest** configured TLS cert expires ≤ `cert_expiry_warn_days`/`cert_expiry_crit_days` (expired → Crit); n/a if no `cert_paths` configured. Certs must be readable by the SSH user |
+| `health-clock-sync`   | `timedatectl show`                         | `NTPSynchronized=no` → Warn (clock unsynced — breaks TLS windows / logs / time-based auth); n/a if not reported |
+| `health-reboot-required` | `ls /run`                               | Debian/Ubuntu `/run/reboot-required` present → Warn (kernel/libraries updated, host running the old code). Debian-family only |
 
 The text report's headline is a **diagnosis**: the overall status followed by a
 compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0 err

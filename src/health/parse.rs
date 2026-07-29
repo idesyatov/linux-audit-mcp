@@ -429,6 +429,69 @@ pub fn parse_snmp_tcp(output: &str) -> Option<u64> {
     None
 }
 
+/// Days since the Unix epoch for a civil (proleptic Gregorian) date. Inverse of
+/// the `civil_from_days` used for history timestamps (Howard Hinnant's algorithm);
+/// lets us turn a certificate `notAfter` date into a comparable timestamp without a
+/// calendar crate.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) as i64 + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Parse the `notAfter=` line of `openssl x509 -noout -enddate` into a Unix
+/// timestamp (seconds). Format is fixed by openssl: `notAfter=Nov 15 12:00:00 2026
+/// GMT` (day space-padded to two chars; always GMT/UTC). `None` if the line is
+/// absent or unparseable (e.g. an unreadable/invalid cert produced no such line).
+pub fn parse_cert_notafter(output: &str) -> Option<i64> {
+    let line = output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("notAfter="))?;
+    let mut it = line.split_whitespace();
+    let month = match it.next()? {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let day: u32 = it.next()?.parse().ok()?;
+    let time = it.next()?;
+    let year: i64 = it.next()?.parse().ok()?;
+    let mut t = time.split(':');
+    let h: i64 = t.next()?.parse().ok()?;
+    let mi: i64 = t.next()?.parse().ok()?;
+    let s: i64 = t.next()?.parse().ok()?;
+    Some(days_from_civil(year, month, day) * 86400 + h * 3600 + mi * 60 + s)
+}
+
+/// `true` if `/run` (from `ls /run`) contains the Debian/Ubuntu `reboot-required`
+/// flag file - a kernel/library update is installed but the host hasn't rebooted.
+pub fn parse_reboot_required(output: &str) -> bool {
+    output.lines().any(|l| l.trim() == "reboot-required")
+}
+
+/// Whether the system clock is NTP-synchronized, from `timedatectl show`
+/// (`NTPSynchronized=yes/no`). `None` if the field is absent (no systemd-timesyncd
+/// / not reported).
+pub fn parse_timedatectl_synced(output: &str) -> Option<bool> {
+    output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("NTPSynchronized="))
+        .map(|v| v.trim() == "yes")
+}
+
 /// One kernel-log category with its hit count and most-recent matching line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KernelEventCategory {
@@ -906,6 +969,50 @@ mod tests {
         assert_eq!(parse_snmp_tcp("Tcp: RtoMin\nTcp: 200\n"), None);
         // No Tcp value line -> None.
         assert_eq!(parse_snmp_tcp("Udp: InDatagrams\nUdp: 1\n"), None);
+    }
+
+    #[test]
+    fn cert_notafter_parses_to_unix() {
+        // 2026-11-15 12:00:00 UTC.
+        let ts = parse_cert_notafter("notAfter=Nov 15 12:00:00 2026 GMT\n").unwrap();
+        assert_eq!(ts, 1_794_744_000);
+        // Day is space-padded to two chars for single digits.
+        assert_eq!(
+            parse_cert_notafter("notAfter=Feb  5 00:00:00 2027 GMT\n"),
+            Some(1_801_785_600)
+        );
+        // The unix epoch itself round-trips.
+        assert_eq!(
+            parse_cert_notafter("notAfter=Jan  1 00:00:00 1970 GMT\n"),
+            Some(0)
+        );
+        // Missing / malformed -> None.
+        assert_eq!(parse_cert_notafter("some other output\n"), None);
+        assert_eq!(
+            parse_cert_notafter("notAfter=Xxx 15 12:00:00 2026 GMT\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn reboot_required_detects_flag_file() {
+        let run = "systemd\nlock\nreboot-required\nreboot-required.pkgs\nsshd.pid\n";
+        assert!(parse_reboot_required(run));
+        assert!(!parse_reboot_required("systemd\nlock\nsshd.pid\n"));
+        assert!(!parse_reboot_required(""));
+    }
+
+    #[test]
+    fn timedatectl_reads_sync_flag() {
+        assert_eq!(
+            parse_timedatectl_synced("Timezone=UTC\nNTPSynchronized=yes\nNTP=yes\n"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_timedatectl_synced("NTPSynchronized=no\n"),
+            Some(false)
+        );
+        assert_eq!(parse_timedatectl_synced("Timezone=UTC\n"), None);
     }
 
     #[test]

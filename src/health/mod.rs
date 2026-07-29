@@ -78,6 +78,11 @@ const CONNTRACK_STAT: &str = "cat /proc/net/stat/nf_conntrack";
 /// [`NETDEV`]) for the retransmit rate shown as context on `health-tcp-errors`.
 /// Handled in [`collect`], not [`evaluate`]. Unprivileged.
 const SNMP: &str = "cat /proc/net/snmp";
+/// systemd time state (`health-clock-sync`); `NTPSynchronized=yes/no`. Unprivileged.
+const TIMEDATECTL: &str = "timedatectl show";
+/// `/run` listing (`health-reboot-required`); the Debian/Ubuntu `reboot-required`
+/// flag file lives here. `/run` always exists, so this exits 0. Unprivileged.
+const LS_RUN: &str = "ls /run";
 
 /// Commands snapped exactly once per snapshot.
 const SINGLE_SHOT: &[&str] = &[
@@ -98,6 +103,8 @@ const SINGLE_SHOT: &[&str] = &[
     OOM_DMESG,
     DOCKER_PS,
     PODMAN_PS,
+    TIMEDATECTL,
+    LS_RUN,
 ];
 
 /// Every read-only command the health snapshot may issue (each must be in the
@@ -128,6 +135,8 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     NETSTAT,
     CONNTRACK_STAT,
     SNMP,
+    TIMEDATECTL,
+    LS_RUN,
 ];
 
 /// The wire command for a container probe: on a `privileged` target the `sudo -n`
@@ -318,6 +327,10 @@ pub struct Thresholds {
     /// internet-facing host and are shown as context only, never gated.
     pub tcp_err_warn_pps: f64,
     pub tcp_err_crit_pps: f64,
+    /// Days until the nearest configured TLS certificate expires (`health-cert-expiry`).
+    /// At/below `warn` → Warn, at/below `crit` (or already expired) → Crit.
+    pub cert_expiry_warn_days: i64,
+    pub cert_expiry_crit_days: i64,
     /// Gap between the two `/proc/net/dev` samples, in seconds.
     pub net_sample_secs: u64,
     /// Failed systemd services: any failed unit is a `Warn`; this many or more
@@ -365,6 +378,8 @@ impl Default for Thresholds {
             conntrack_drop_crit_pps: 10.0,
             tcp_err_warn_pps: 1.0,
             tcp_err_crit_pps: 10.0,
+            cert_expiry_warn_days: 21,
+            cert_expiry_crit_days: 7,
             net_sample_secs: 1,
             failed_units_crit: 0,
             zombie_crit: 0,
@@ -1234,6 +1249,130 @@ fn kernel_events_metric(outputs: &Outputs) -> Metric {
     }
 }
 
+/// System clock NTP synchronization from `timedatectl show`. An unsynchronized
+/// clock breaks TLS validity windows, log correlation and time-based auth, so
+/// `NTPSynchronized=no` is a `Warn`. Absent field (no systemd time daemon / not
+/// reported) → `Unknown`.
+fn clock_sync_metric(outputs: &Outputs) -> Metric {
+    const ID: &str = "health-clock-sync";
+    const TITLE: &str = "Clock synchronization";
+    let Some(text) = out(outputs, TIMEDATECTL) else {
+        return unknown(ID, TITLE, "timedatectl unavailable");
+    };
+    match parse::parse_timedatectl_synced(text) {
+        Some(true) => Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Ok,
+            value: "clock synchronized".to_string(),
+            detail: "NTPSynchronized=yes".to_string(),
+            numeric: Some(1.0),
+        },
+        Some(false) => Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Warn,
+            value: "clock NOT synchronized".to_string(),
+            detail: "NTPSynchronized=no (NTP disabled or time source unreachable)".to_string(),
+            numeric: Some(0.0),
+        },
+        None => unknown(ID, TITLE, "NTPSynchronized not reported"),
+    }
+}
+
+/// Pending reboot after a kernel/library update, from the Debian/Ubuntu
+/// `/run/reboot-required` flag (seen via `ls /run`). Present → `Warn` (the host is
+/// running the old kernel/libraries). RHEL has no equivalent flag file - its
+/// `needs-restarting -r` reports via exit code, which the health engine can't read -
+/// so this is Debian-family only; a host without the flag simply reports `Ok`.
+/// Absent `/run` listing → `Unknown`.
+fn reboot_required_metric(outputs: &Outputs) -> Metric {
+    const ID: &str = "health-reboot-required";
+    const TITLE: &str = "Pending reboot";
+    let Some(text) = out(outputs, LS_RUN) else {
+        return unknown(ID, TITLE, "/run listing unavailable");
+    };
+    if parse::parse_reboot_required(text) {
+        Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Warn,
+            value: "reboot required".to_string(),
+            detail: "/run/reboot-required present (kernel/libraries updated, not yet rebooted)"
+                .to_string(),
+            numeric: Some(1.0),
+        }
+    } else {
+        Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Ok,
+            value: "no reboot required".to_string(),
+            detail: "no /run/reboot-required flag".to_string(),
+            numeric: Some(0.0),
+        }
+    }
+}
+
+/// Days until the nearest configured TLS certificate expires. `certs` pairs each
+/// configured path with its `openssl x509 -noout -enddate` output (or `None` if the
+/// read failed). Reports the minimum days-remaining across all readable certs; at or
+/// below `cert_expiry_crit_days` (or already expired) → `Crit`, at or below
+/// `cert_expiry_warn_days` → `Warn`. Unreadable/unparseable certs are noted but don't
+/// gate as long as at least one cert parsed. No configured paths → `Unknown`.
+fn cert_expiry_metric(certs: &[(String, Option<String>)], thr: &Thresholds, now: i64) -> Metric {
+    const ID: &str = "health-cert-expiry";
+    const TITLE: &str = "TLS certificate expiry";
+    if certs.is_empty() {
+        return unknown(ID, TITLE, "no cert_paths configured");
+    }
+    let mut nearest: Option<(i64, &str)> = None;
+    let mut unreadable = 0usize;
+    for (path, output) in certs {
+        match output.as_deref().and_then(parse::parse_cert_notafter) {
+            Some(notafter) => {
+                let days = (notafter - now).div_euclid(86_400);
+                if nearest.map_or(true, |(m, _)| days < m) {
+                    nearest = Some((days, path));
+                }
+            }
+            None => unreadable += 1,
+        }
+    }
+    let Some((days, path)) = nearest else {
+        return unknown(
+            ID,
+            TITLE,
+            format!("no readable certificate ({unreadable} unreadable)"),
+        );
+    };
+    let status = if days <= thr.cert_expiry_crit_days {
+        HealthStatus::Crit
+    } else if days <= thr.cert_expiry_warn_days {
+        HealthStatus::Warn
+    } else {
+        HealthStatus::Ok
+    };
+    let note = if unreadable > 0 {
+        format!(", {unreadable} unreadable")
+    } else {
+        String::new()
+    };
+    let value = if days < 0 {
+        format!("EXPIRED {} day(s) ago ({path})", -days)
+    } else {
+        format!("{days} day(s) until expiry ({path})")
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value,
+        detail: format!("nearest of {} configured cert(s){note}", certs.len()),
+        numeric: Some(days as f64),
+    }
+}
+
 /// Worst status across metrics (`Unknown` is neutral; `Unknown` overall only if
 /// nothing could be measured).
 fn worst(metrics: &[Metric]) -> HealthStatus {
@@ -1262,6 +1401,8 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(zombie_metric(outputs, thr));
     metrics.push(oom_metric(outputs));
     metrics.push(kernel_events_metric(outputs));
+    metrics.push(clock_sync_metric(outputs));
+    metrics.push(reboot_required_metric(outputs));
     metrics.push(containers_metric(outputs));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
@@ -1327,6 +1468,7 @@ pub async fn collect(
     ssh: &SshConfig,
     thr: &Thresholds,
     privileged: bool,
+    cert_paths: &[String],
 ) -> Result<HealthReport, SshError> {
     let mut outputs: Outputs = HashMap::new();
     for &cmd in SINGLE_SHOT {
@@ -1422,8 +1564,28 @@ pub async fn collect(
         }
     }
 
+    // TLS certificate expiry: read each configured cert path (the command is a
+    // parameterized catalog entry, see `catalog::is_cert_read`). A read failure just
+    // marks that cert unreadable; the metric is Unknown only when nothing is configured.
+    let mut certs: Vec<(String, Option<String>)> = Vec::with_capacity(cert_paths.len());
+    for path in cert_paths {
+        let cmd = format!("openssl x509 -in {path} -noout -enddate");
+        certs.push((path.clone(), run_single(ssh, &cmd).await?));
+    }
+    let now = now_unix_secs();
+    report.metrics.push(cert_expiry_metric(&certs, thr, now));
+
     report.overall = worst(&report.metrics);
     Ok(report)
+}
+
+/// Current Unix time in whole seconds (0 if the clock is before the epoch). Local
+/// helper so cert-expiry math needn't reach into the history module.
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Run one command: `Ok(Some(stdout))` on success, `Ok(None)` if it failed
@@ -1698,6 +1860,89 @@ mod tests {
         )]));
         assert_eq!(crit.status, HealthStatus::Crit);
         assert_eq!(crit.numeric, Some(1.0));
+    }
+
+    #[test]
+    fn clock_sync_flags_unsynchronized() {
+        let m = |v: &str| clock_sync_metric(&outputs(&[("timedatectl show", v)]));
+        assert_eq!(m("NTPSynchronized=yes\n").status, HealthStatus::Ok);
+        assert_eq!(m("NTPSynchronized=no\n").status, HealthStatus::Warn);
+        // Field absent -> Unknown (never gates); no output -> Unknown.
+        assert_eq!(m("Timezone=UTC\n").status, HealthStatus::Unknown);
+        assert_eq!(
+            clock_sync_metric(&outputs(&[])).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn reboot_required_flags_pending() {
+        let m = |v: &str| reboot_required_metric(&outputs(&[("ls /run", v)]));
+        assert_eq!(
+            m("systemd\nreboot-required\nlock\n").status,
+            HealthStatus::Warn
+        );
+        assert_eq!(m("systemd\nlock\n").status, HealthStatus::Ok);
+        assert_eq!(
+            reboot_required_metric(&outputs(&[])).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn cert_expiry_gates_on_nearest() {
+        let thr = Thresholds::default(); // warn 21, crit 7 days
+        let na = 1_794_744_000_i64; // Nov 15 2026 12:00 UTC
+        let day = 86_400_i64;
+        let cert = |p: &str| {
+            (
+                p.to_string(),
+                Some("notAfter=Nov 15 12:00:00 2026 GMT\n".to_string()),
+            )
+        };
+        // 30 / 14 / 3 days out -> Ok / Warn / Crit.
+        assert_eq!(
+            cert_expiry_metric(&[cert("/a")], &thr, na - 30 * day).status,
+            HealthStatus::Ok
+        );
+        assert_eq!(
+            cert_expiry_metric(&[cert("/a")], &thr, na - 14 * day).status,
+            HealthStatus::Warn
+        );
+        assert_eq!(
+            cert_expiry_metric(&[cert("/a")], &thr, na - 3 * day).status,
+            HealthStatus::Crit
+        );
+        // Already expired -> Crit, value says EXPIRED.
+        let exp = cert_expiry_metric(&[cert("/a")], &thr, na + 5 * day);
+        assert_eq!(exp.status, HealthStatus::Crit);
+        assert!(exp.value.contains("EXPIRED"), "{}", exp.value);
+        // The nearest cert gates: a far cert plus a near one -> Crit.
+        let far = (
+            "/far".to_string(),
+            Some("notAfter=Nov 15 12:00:00 2027 GMT\n".to_string()),
+        );
+        assert_eq!(
+            cert_expiry_metric(&[far, cert("/near")], &thr, na - 3 * day).status,
+            HealthStatus::Crit
+        );
+        // No configured paths -> Unknown; all unreadable -> Unknown.
+        assert_eq!(
+            cert_expiry_metric(&[], &thr, na).status,
+            HealthStatus::Unknown
+        );
+        assert_eq!(
+            cert_expiry_metric(&[("/x".to_string(), None)], &thr, na).status,
+            HealthStatus::Unknown
+        );
+        // One unreadable + one good -> uses the good one, notes the unreadable.
+        let mixed = cert_expiry_metric(
+            &[("/x".to_string(), None), cert("/ok")],
+            &thr,
+            na - 30 * day,
+        );
+        assert_eq!(mixed.status, HealthStatus::Ok);
+        assert!(mixed.detail.contains("unreadable"), "{}", mixed.detail);
     }
 
     #[test]

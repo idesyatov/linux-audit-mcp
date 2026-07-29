@@ -16,6 +16,8 @@
     "health-zombies": "ok",
     "health-oom": "unknown",
     "health-kernel-events": "unknown",
+    "health-clock-sync": "ok",
+    "health-reboot-required": "ok",
     "health-containers": "ok"
   },
   "overall": "ok"

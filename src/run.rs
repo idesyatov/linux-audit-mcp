@@ -78,13 +78,14 @@ pub async fn health_targets(
             resolved.to_ssh_config(),
             resolved.health,
             resolved.privileged,
+            resolved.cert_paths,
         ));
     }
 
     let mut set = JoinSet::new();
-    for (i, (alias, ssh, thr, privileged)) in jobs.into_iter().enumerate() {
+    for (i, (alias, ssh, thr, privileged, cert_paths)) in jobs.into_iter().enumerate() {
         set.spawn(async move {
-            let result = health::collect(&ssh, &thr, privileged)
+            let result = health::collect(&ssh, &thr, privileged, &cert_paths)
                 .await
                 .map_err(|e| e.to_string());
             (i, HealthOutcome { alias, result })

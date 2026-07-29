@@ -58,6 +58,10 @@ pub struct HostVars {
     /// Opt in to privileged (`sudo -n ...`) checks for this target. Requires the
     /// operator to grant NOPASSWD sudo for exactly those commands (see README).
     pub privileged: Option<bool>,
+    /// Absolute paths to TLS certificate files (`fullchain.pem`/`cert.pem`) whose
+    /// expiry the `health-cert-expiry` metric should watch. Must be readable by the
+    /// SSH user. Unset/empty disables the metric for this target.
+    pub cert_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +94,7 @@ pub struct ResolvedTarget {
     pub health: Thresholds,
     pub anomaly: AnomalyConfig,
     pub privileged: bool,
+    pub cert_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -230,6 +235,14 @@ impl Config {
                 .unwrap_or_default(),
             privileged: inherit(v.privileged, &groups, |h| h.privileged, "privileged", alias)?
                 .unwrap_or(false),
+            cert_paths: inherit(
+                v.cert_paths.clone(),
+                &groups,
+                |h| h.cert_paths.clone(),
+                "cert_paths",
+                alias,
+            )?
+            .unwrap_or_default(),
         })
     }
 

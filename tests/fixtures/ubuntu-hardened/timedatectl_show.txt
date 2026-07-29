@@ -1,0 +1,4 @@
+Timezone=UTC
+LocalRTC=no
+NTPSynchronized=yes
+NTP=yes

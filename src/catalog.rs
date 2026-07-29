@@ -87,6 +87,13 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // /proc/net/netstat holds `TcpExt:` TCPAbortOnMemory/PruneCalled/TCPRcvQDrop -
     // the stack shedding connections under memory/backlog pressure. Unprivileged.
     "cat /proc/net/snmp",
+    // System time state (health-clock-sync): `NTPSynchronized=yes/no`. An unsynced
+    // clock breaks TLS validity windows, log correlation and time-based auth.
+    "timedatectl show",
+    // /run listing (health-reboot-required): the Debian/Ubuntu `reboot-required`
+    // flag file lives here after a kernel/library update. `/run` always exists, so
+    // this exits 0; read-only.
+    "ls /run",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",
@@ -148,6 +155,27 @@ fn is_allowed_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || " /-_.=,:".contains(c)
 }
 
+/// Fixed prefix/suffix of the parameterized certificate-expiry read.
+const CERT_READ_PREFIX: &str = "openssl x509 -in ";
+const CERT_READ_SUFFIX: &str = " -noout -enddate";
+
+/// `true` if `command` is a certificate-expiry read for a single absolute path
+/// (`openssl x509 -in <path> -noout -enddate`). This is the one parameterized
+/// command the catalog allows: operator-configured `cert_paths` vary per host, so a
+/// fixed per-path entry is impossible. It stays safe because the prefix/suffix are
+/// fixed, `openssl x509 ... -noout -enddate` only prints (read-only), the global
+/// charset check already forbids every shell metacharacter, and the path must be
+/// absolute with no `..` traversal or embedded space.
+fn is_cert_read(command: &str) -> bool {
+    let Some(rest) = command.strip_prefix(CERT_READ_PREFIX) else {
+        return false;
+    };
+    let Some(path) = rest.strip_suffix(CERT_READ_SUFFIX) else {
+        return false;
+    };
+    path.starts_with('/') && !path.contains("..") && !path.contains(' ')
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum CatalogError {
     /// The command is empty.
@@ -180,6 +208,11 @@ pub fn validate(command: &str) -> Result<(), CatalogError> {
     }
     if let Some(c) = cmd.chars().find(|c| !is_allowed_char(*c)) {
         return Err(CatalogError::IllegalCharacter(c));
+    }
+    // The one parameterized command: a certificate-expiry read for a configured
+    // absolute path (the exact-membership list can't enumerate per-host paths).
+    if is_cert_read(cmd) {
+        return Ok(());
     }
     if !READONLY_COMMANDS.contains(&cmd) {
         return Err(CatalogError::NotInCatalog(cmd.to_string()));
@@ -243,5 +276,32 @@ mod tests {
     fn rejects_empty() {
         assert_eq!(validate(""), Err(CatalogError::Empty));
         assert_eq!(validate("   "), Err(CatalogError::Empty));
+    }
+
+    #[test]
+    fn allows_cert_read_for_absolute_paths_only() {
+        // A cert-expiry read for an absolute path is allowed (parameterized).
+        assert!(is_allowed(
+            "openssl x509 -in /etc/letsencrypt/live/example.com/fullchain.pem -noout -enddate"
+        ));
+        assert!(is_allowed(
+            "openssl x509 -in /etc/ssl/certs/site.pem -noout -enddate"
+        ));
+        // Relative path, `..` traversal, or a different openssl subcommand: rejected.
+        assert!(!is_allowed(
+            "openssl x509 -in etc/ssl/site.pem -noout -enddate"
+        ));
+        assert!(!is_allowed(
+            "openssl x509 -in /etc/ssl/../shadow -noout -enddate"
+        ));
+        assert!(!is_allowed("openssl x509 -in /etc/ssl/site.pem -text"));
+        assert!(!is_allowed(
+            "openssl req -in /etc/ssl/site.pem -noout -enddate"
+        ));
+        // Chars are still enforced first: a metacharacter never reaches is_cert_read.
+        assert!(matches!(
+            validate("openssl x509 -in /etc/ssl/a;b.pem -noout -enddate"),
+            Err(CatalogError::IllegalCharacter(';'))
+        ));
     }
 }

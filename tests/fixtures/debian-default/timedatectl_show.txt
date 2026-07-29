@@ -1,0 +1,3 @@
+Timezone=Europe/Berlin
+NTPSynchronized=yes
+NTP=yes

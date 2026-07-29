@@ -16,6 +16,8 @@
     "health-zombies": "warn",
     "health-oom": "warn",
     "health-kernel-events": "ok",
+    "health-clock-sync": "warn",
+    "health-reboot-required": "ok",
     "health-containers": "crit"
   },
   "overall": "crit"
