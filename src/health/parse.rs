@@ -476,10 +476,51 @@ pub fn parse_cert_notafter(output: &str) -> Option<i64> {
     Some(days_from_civil(year, month, day) * 86400 + h * 3600 + mi * 60 + s)
 }
 
+/// Certificates and their days-until-expiry from `certbot certificates`:
+/// `(name, days)`. certbot already computes the remaining days, printed as
+/// `Expiry Date: ... (VALID: N days)`; an `(INVALID: ...)` cert (e.g. `EXPIRED`)
+/// yields `0` so it gates as critical. This auto-discovers every certbot-managed
+/// cert on the host without configuring any paths. `Certificate Name:` names the
+/// cert block; the following `Expiry Date:` line carries the verdict.
+pub fn parse_certbot_certificates(output: &str) -> Vec<(String, i64)> {
+    let mut certs = Vec::new();
+    let mut name: Option<String> = None;
+    for line in output.lines() {
+        let t = line.trim();
+        if let Some(n) = t.strip_prefix("Certificate Name:") {
+            name = Some(n.trim().to_string());
+        } else if let Some(rest) = t.strip_prefix("Expiry Date:") {
+            let label = name.take().unwrap_or_else(|| "cert".to_string());
+            // `... (VALID: N days)` -> N; anything else (INVALID/EXPIRED) -> 0.
+            let days = rest
+                .split_once("(VALID:")
+                .and_then(|(_, v)| v.split_whitespace().next())
+                .and_then(|n| n.parse::<i64>().ok())
+                .unwrap_or(0);
+            certs.push((label, days));
+        }
+    }
+    certs
+}
+
 /// `true` if `/run` (from `ls /run`) contains the Debian/Ubuntu `reboot-required`
 /// flag file - a kernel/library update is installed but the host hasn't rebooted.
 pub fn parse_reboot_required(output: &str) -> bool {
     output.lines().any(|l| l.trim() == "reboot-required")
+}
+
+/// The newest installed kernel from `rpm -q --last kernel` (newest install first):
+/// the first line's package NVRA minus the `kernel-` prefix. Compared against
+/// `uname -r` to detect a pending RHEL reboot. `None` if unparseable (non-rpm distro,
+/// or no kernel package) - the RHEL reboot path then simply doesn't fire.
+pub fn parse_newest_kernel(rpm_last: &str) -> Option<String> {
+    rpm_last
+        .lines()
+        .next()?
+        .split_whitespace()
+        .next()?
+        .strip_prefix("kernel-")
+        .map(str::to_string)
 }
 
 /// Writable on-disk filesystems. Only these are flagged when mounted read-only:
@@ -1036,11 +1077,47 @@ mod tests {
     }
 
     #[test]
+    fn certbot_certificates_extract_name_and_days() {
+        let out = "Found the following certs:\n\
+                   \x20 Certificate Name: example.com\n\
+                   \x20   Domains: example.com www.example.com\n\
+                   \x20   Expiry Date: 2026-09-15 12:00:00+00:00 (VALID: 47 days)\n\
+                   \x20   Certificate Path: /etc/letsencrypt/live/example.com/fullchain.pem\n\
+                   \x20 Certificate Name: old.example.org\n\
+                   \x20   Expiry Date: 2025-01-01 00:00:00+00:00 (INVALID: EXPIRED)\n";
+        assert_eq!(
+            parse_certbot_certificates(out),
+            vec![
+                ("example.com".to_string(), 47),
+                ("old.example.org".to_string(), 0), // expired -> 0 (gates Crit)
+            ]
+        );
+        assert!(parse_certbot_certificates("No certs found.\n").is_empty());
+    }
+
+    #[test]
     fn reboot_required_detects_flag_file() {
         let run = "systemd\nlock\nreboot-required\nreboot-required.pkgs\nsshd.pid\n";
         assert!(parse_reboot_required(run));
         assert!(!parse_reboot_required("systemd\nlock\nsshd.pid\n"));
         assert!(!parse_reboot_required(""));
+    }
+
+    #[test]
+    fn newest_kernel_from_rpm_last() {
+        let rpm = "kernel-5.14.0-500.el9_5.x86_64                Tue 20 Feb 2024 ...\n\
+                   kernel-5.14.0-427.el9_4.x86_64                Mon 15 Jan 2024 ...\n";
+        // First line (newest install) minus the `kernel-` prefix.
+        assert_eq!(
+            parse_newest_kernel(rpm).as_deref(),
+            Some("5.14.0-500.el9_5.x86_64")
+        );
+        // Non-rpm distro / no kernel package -> None (RHEL path stays inactive).
+        assert_eq!(parse_newest_kernel(""), None);
+        assert_eq!(
+            parse_newest_kernel("package kernel is not installed\n"),
+            None
+        );
     }
 
     #[test]

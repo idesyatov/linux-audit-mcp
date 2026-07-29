@@ -94,6 +94,13 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // flag file lives here after a kernel/library update. `/run` always exists, so
     // this exits 0; read-only.
     "ls /run",
+    // Running kernel + newest installed kernel (health-reboot-required, RHEL path):
+    // if the newest installed kernel differs from the running one, a kernel update
+    // needs a reboot. RHEL has no `/run/reboot-required` flag and `needs-restarting
+    // -r` reports via exit code (which the health engine discards), so we compare
+    // instead. Both exit 0; `rpm -q` is a read-only query.
+    "uname -r",
+    "rpm -q --last kernel",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",
@@ -116,6 +123,10 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // process ...` here. Root-only when `kernel.dmesg_restrict=1` (the common
     // default), hence the `sudo -n` form. `dmesg` with no args only prints.
     "sudo -n dmesg",
+    // TLS certificate inventory (health-cert-expiry): certbot lists every managed
+    // certificate with its expiry ("VALID: N days"), so certs are auto-discovered
+    // with no configured paths. Reads /etc/letsencrypt (root-only), hence `sudo -n`.
+    "sudo -n certbot certificates",
     // SUID-root binaries. `-xdev` keeps the scan on the root filesystem (never
     // descending into other mounts or pseudo-filesystems like /proc, /sys), so it
     // is bounded and can't hang on a network mount. A transient per-path error

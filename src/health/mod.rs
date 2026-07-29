@@ -63,6 +63,11 @@ const SUDO_PODMAN_PS: &str = "sudo -n podman ps -a";
 /// is on by default), so it is sent solely to `privileged` targets; elsewhere the
 /// metric reports `Unknown`.
 const OOM_DMESG: &str = "sudo -n dmesg";
+/// Certbot certificate inventory (`health-cert-expiry`). Privileged (reads
+/// `/etc/letsencrypt`), so sent only to opted-in targets - it auto-discovers every
+/// certbot-managed cert with its expiry, no configured paths needed. Handled in
+/// [`collect`], not [`evaluate`].
+const CERTBOT: &str = "sudo -n certbot certificates";
 /// Sampled twice (not single-shot) to derive throughput and error rate, so it is
 /// handled apart from [`SINGLE_SHOT`] in [`collect`] and yields no metric in
 /// [`evaluate`].
@@ -87,6 +92,12 @@ const LS_RUN: &str = "ls /run";
 /// kernel remounted it read-only after disk errors. Already in the catalog (shared
 /// with the `kernel-mount-options` security check). Unprivileged.
 const PROC_MOUNTS: &str = "cat /proc/mounts";
+/// Running kernel release (`health-reboot-required`, RHEL path). Unprivileged.
+const UNAME_R: &str = "uname -r";
+/// Installed kernels newest-first (`health-reboot-required`, RHEL path): if the
+/// newest installed kernel differs from the running one, a reboot is pending.
+/// Unprivileged; errors on non-rpm distros (then the RHEL path is inactive).
+const RPM_LAST_KERNEL: &str = "rpm -q --last kernel";
 
 /// Commands snapped exactly once per snapshot.
 const SINGLE_SHOT: &[&str] = &[
@@ -110,6 +121,8 @@ const SINGLE_SHOT: &[&str] = &[
     TIMEDATECTL,
     LS_RUN,
     PROC_MOUNTS,
+    UNAME_R,
+    RPM_LAST_KERNEL,
 ];
 
 /// Every read-only command the health snapshot may issue (each must be in the
@@ -136,6 +149,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     PODMAN_PS,
     SUDO_DOCKER_PS,
     SUDO_PODMAN_PS,
+    CERTBOT,
     NETDEV,
     NETSTAT,
     CONNTRACK_STAT,
@@ -143,6 +157,8 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     TIMEDATECTL,
     LS_RUN,
     PROC_MOUNTS,
+    UNAME_R,
+    RPM_LAST_KERNEL,
 ];
 
 /// The wire command for a container probe: on a `privileged` target the `sudo -n`
@@ -1286,36 +1302,53 @@ fn clock_sync_metric(outputs: &Outputs) -> Metric {
     }
 }
 
-/// Pending reboot after a kernel/library update, from the Debian/Ubuntu
-/// `/run/reboot-required` flag (seen via `ls /run`). Present → `Warn` (the host is
-/// running the old kernel/libraries). RHEL has no equivalent flag file - its
-/// `needs-restarting -r` reports via exit code, which the health engine can't read -
-/// so this is Debian-family only; a host without the flag simply reports `Ok`.
-/// Absent `/run` listing → `Unknown`.
+/// Pending reboot after a kernel/library update, cross-distro. On Debian/Ubuntu the
+/// `/run/reboot-required` flag (via `ls /run`) is authoritative. RHEL/Rocky has no
+/// such flag, and `needs-restarting -r` reports via exit code (which the health engine
+/// discards), so there we compare the running kernel (`uname -r`) to the newest
+/// installed (`rpm -q --last kernel`): a newer installed kernel means a reboot is
+/// pending. The RHEL path catches kernel updates (the main reboot reason) but not
+/// userspace library updates. Either signal is a `Warn` (naming which); neither is
+/// `Ok`; no signal source at all is `Unknown`.
 fn reboot_required_metric(outputs: &Outputs) -> Metric {
     const ID: &str = "health-reboot-required";
     const TITLE: &str = "Pending reboot";
-    let Some(text) = out(outputs, LS_RUN) else {
-        return unknown(ID, TITLE, "/run listing unavailable");
+    let debian_flag = out(outputs, LS_RUN).map(parse::parse_reboot_required);
+    let rhel_kernel = match (out(outputs, UNAME_R), out(outputs, RPM_LAST_KERNEL)) {
+        (Some(u), Some(r)) => parse::parse_newest_kernel(r).map(|newest| (u.trim(), newest)),
+        _ => None,
     };
-    if parse::parse_reboot_required(text) {
-        Metric {
-            id: ID,
-            title: TITLE,
-            status: HealthStatus::Warn,
-            value: "reboot required".to_string(),
-            detail: "/run/reboot-required present (kernel/libraries updated, not yet rebooted)"
-                .to_string(),
-            numeric: Some(1.0),
+    if debian_flag.is_none() && rhel_kernel.is_none() {
+        return unknown(ID, TITLE, "no reboot-signal source available");
+    }
+    let mut reasons = Vec::new();
+    if debian_flag == Some(true) {
+        reasons.push("/run/reboot-required present".to_string());
+    }
+    if let Some((running, newest)) = &rhel_kernel {
+        if newest != running {
+            reasons.push(format!(
+                "newer kernel installed (running {running}, installed {newest})"
+            ));
         }
-    } else {
+    }
+    if reasons.is_empty() {
         Metric {
             id: ID,
             title: TITLE,
             status: HealthStatus::Ok,
             value: "no reboot required".to_string(),
-            detail: "no /run/reboot-required flag".to_string(),
+            detail: "running kernel is current; no reboot-required flag".to_string(),
             numeric: Some(0.0),
+        }
+    } else {
+        Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Warn,
+            value: "reboot required".to_string(),
+            detail: reasons.join("; "),
+            numeric: Some(1.0),
         }
     }
 }
@@ -1363,38 +1396,24 @@ fn fs_readonly_metric(outputs: &Outputs) -> Metric {
     }
 }
 
-/// Days until the nearest configured TLS certificate expires. `certs` pairs each
-/// configured path with its `openssl x509 -noout -enddate` output (or `None` if the
-/// read failed). Reports the minimum days-remaining across all readable certs; at or
-/// below `cert_expiry_crit_days` (or already expired) → `Crit`, at or below
-/// `cert_expiry_warn_days` → `Warn`. Unreadable/unparseable certs are noted but don't
-/// gate as long as at least one cert parsed. No configured paths → `Unknown`.
-fn cert_expiry_metric(certs: &[(String, Option<String>)], thr: &Thresholds, now: i64) -> Metric {
+/// Days until the nearest TLS certificate expires. `certs` pairs each discovered or
+/// configured certificate `(label, days_remaining)` - `days` is pre-computed (certbot
+/// prints it directly; cert_paths openssl reads are converted in [`collect`]).
+/// `unreadable` counts configured paths that couldn't be read. Reports the minimum
+/// days-remaining; at or below `cert_expiry_crit_days` (or already expired) → `Crit`,
+/// at or below `cert_expiry_warn_days` → `Warn`. No certificates at all → `Unknown`.
+fn cert_expiry_metric(certs: &[(String, i64)], unreadable: usize, thr: &Thresholds) -> Metric {
     const ID: &str = "health-cert-expiry";
     const TITLE: &str = "TLS certificate expiry";
-    if certs.is_empty() {
-        return unknown(ID, TITLE, "no cert_paths configured");
-    }
-    let mut nearest: Option<(i64, &str)> = None;
-    let mut unreadable = 0usize;
-    for (path, output) in certs {
-        match output.as_deref().and_then(parse::parse_cert_notafter) {
-            Some(notafter) => {
-                let days = (notafter - now).div_euclid(86_400);
-                if nearest.map_or(true, |(m, _)| days < m) {
-                    nearest = Some((days, path));
-                }
-            }
-            None => unreadable += 1,
-        }
-    }
-    let Some((days, path)) = nearest else {
-        return unknown(
-            ID,
-            TITLE,
-            format!("no readable certificate ({unreadable} unreadable)"),
-        );
+    let Some((label, days)) = certs.iter().min_by_key(|(_, d)| *d) else {
+        let why = if unreadable > 0 {
+            format!("no readable certificate ({unreadable} unreadable)")
+        } else {
+            "no certificates found (certbot auto-discovery + configured cert_paths)".to_string()
+        };
+        return unknown(ID, TITLE, why);
     };
+    let days = *days;
     let status = if days <= thr.cert_expiry_crit_days {
         HealthStatus::Crit
     } else if days <= thr.cert_expiry_warn_days {
@@ -1407,17 +1426,17 @@ fn cert_expiry_metric(certs: &[(String, Option<String>)], thr: &Thresholds, now:
     } else {
         String::new()
     };
-    let value = if days < 0 {
-        format!("EXPIRED {} day(s) ago ({path})", -days)
+    let value = if days <= 0 {
+        format!("EXPIRED or expiring today ({label})")
     } else {
-        format!("{days} day(s) until expiry ({path})")
+        format!("{days} day(s) until expiry ({label})")
     };
     Metric {
         id: ID,
         title: TITLE,
         status,
         value,
-        detail: format!("nearest of {} configured cert(s){note}", certs.len()),
+        detail: format!("nearest of {} cert(s){note}", certs.len()),
         numeric: Some(days as f64),
     }
 }
@@ -1614,16 +1633,34 @@ pub async fn collect(
         }
     }
 
-    // TLS certificate expiry: read each configured cert path (the command is a
-    // parameterized catalog entry, see `catalog::is_cert_read`). A read failure just
-    // marks that cert unreadable; the metric is Unknown only when nothing is configured.
-    let mut certs: Vec<(String, Option<String>)> = Vec::with_capacity(cert_paths.len());
-    for path in cert_paths {
-        let cmd = format!("openssl x509 -in {path} -noout -enddate");
-        certs.push((path.clone(), run_single(ssh, &cmd).await?));
+    // TLS certificate expiry, as `(label, days_remaining)`. Two sources, merged:
+    //   1. auto-discovery: `sudo -n certbot certificates` finds every certbot-managed
+    //      cert with its expiry, no configured paths. Privileged-only (reads
+    //      /etc/letsencrypt), so sent solely to opted-in targets.
+    //   2. configured `cert_paths`: an optional escape hatch for non-certbot / manual
+    //      certs, read via `openssl x509 -noout -enddate` (parameterized catalog entry).
+    let mut certs: Vec<(String, i64)> = Vec::new();
+    let mut unreadable = 0usize;
+    if privileged {
+        if let Some(o) = run_single(ssh, CERTBOT).await? {
+            certs.extend(parse::parse_certbot_certificates(&o));
+        }
     }
     let now = now_unix_secs();
-    report.metrics.push(cert_expiry_metric(&certs, thr, now));
+    for path in cert_paths {
+        let cmd = format!("openssl x509 -in {path} -noout -enddate");
+        match run_single(ssh, &cmd)
+            .await?
+            .as_deref()
+            .and_then(parse::parse_cert_notafter)
+        {
+            Some(notafter) => certs.push((path.clone(), (notafter - now).div_euclid(86_400))),
+            None => unreadable += 1,
+        }
+    }
+    report
+        .metrics
+        .push(cert_expiry_metric(&certs, unreadable, thr));
 
     report.overall = worst(&report.metrics);
     Ok(report)
@@ -1927,16 +1964,38 @@ mod tests {
 
     #[test]
     fn reboot_required_flags_pending() {
-        let m = |v: &str| reboot_required_metric(&outputs(&[("ls /run", v)]));
+        // Debian path: /run/reboot-required flag.
+        let deb = |v: &str| reboot_required_metric(&outputs(&[("ls /run", v)]));
         assert_eq!(
-            m("systemd\nreboot-required\nlock\n").status,
+            deb("systemd\nreboot-required\nlock\n").status,
             HealthStatus::Warn
         );
-        assert_eq!(m("systemd\nlock\n").status, HealthStatus::Ok);
+        assert_eq!(deb("systemd\nlock\n").status, HealthStatus::Ok);
+        // No signal source at all -> Unknown.
         assert_eq!(
             reboot_required_metric(&outputs(&[])).status,
             HealthStatus::Unknown
         );
+        // RHEL path: newer kernel installed than running -> Warn.
+        let rpm = "kernel-5.14.0-500.el9_5.x86_64  Tue\nkernel-5.14.0-427.el9_4.x86_64  Mon\n";
+        let rhel_stale = reboot_required_metric(&outputs(&[
+            ("ls /run", "systemd\nlock\n"), // no Debian flag
+            ("uname -r", "5.14.0-427.el9_4.x86_64\n"),
+            ("rpm -q --last kernel", rpm),
+        ]));
+        assert_eq!(rhel_stale.status, HealthStatus::Warn);
+        assert!(
+            rhel_stale.detail.contains("newer kernel"),
+            "{}",
+            rhel_stale.detail
+        );
+        // RHEL running the newest kernel -> Ok.
+        let rhel_ok = reboot_required_metric(&outputs(&[
+            ("ls /run", "systemd\nlock\n"),
+            ("uname -r", "5.14.0-500.el9_5.x86_64\n"),
+            ("rpm -q --last kernel", rpm),
+        ]));
+        assert_eq!(rhel_ok.status, HealthStatus::Ok);
     }
 
     #[test]
@@ -1964,55 +2023,40 @@ mod tests {
     #[test]
     fn cert_expiry_gates_on_nearest() {
         let thr = Thresholds::default(); // warn 21, crit 7 days
-        let na = 1_794_744_000_i64; // Nov 15 2026 12:00 UTC
-        let day = 86_400_i64;
-        let cert = |p: &str| {
-            (
-                p.to_string(),
-                Some("notAfter=Nov 15 12:00:00 2026 GMT\n".to_string()),
-            )
-        };
+        let cert = |label: &str, days: i64| (label.to_string(), days);
         // 30 / 14 / 3 days out -> Ok / Warn / Crit.
         assert_eq!(
-            cert_expiry_metric(&[cert("/a")], &thr, na - 30 * day).status,
+            cert_expiry_metric(&[cert("a", 30)], 0, &thr).status,
             HealthStatus::Ok
         );
         assert_eq!(
-            cert_expiry_metric(&[cert("/a")], &thr, na - 14 * day).status,
+            cert_expiry_metric(&[cert("a", 14)], 0, &thr).status,
             HealthStatus::Warn
         );
         assert_eq!(
-            cert_expiry_metric(&[cert("/a")], &thr, na - 3 * day).status,
+            cert_expiry_metric(&[cert("a", 3)], 0, &thr).status,
             HealthStatus::Crit
         );
-        // Already expired -> Crit, value says EXPIRED.
-        let exp = cert_expiry_metric(&[cert("/a")], &thr, na + 5 * day);
+        // Already expired (<=0) -> Crit, value says EXPIRED.
+        let exp = cert_expiry_metric(&[cert("a", -5)], 0, &thr);
         assert_eq!(exp.status, HealthStatus::Crit);
         assert!(exp.value.contains("EXPIRED"), "{}", exp.value);
         // The nearest cert gates: a far cert plus a near one -> Crit.
-        let far = (
-            "/far".to_string(),
-            Some("notAfter=Nov 15 12:00:00 2027 GMT\n".to_string()),
-        );
         assert_eq!(
-            cert_expiry_metric(&[far, cert("/near")], &thr, na - 3 * day).status,
+            cert_expiry_metric(&[cert("far", 300), cert("near", 3)], 0, &thr).status,
             HealthStatus::Crit
         );
-        // No configured paths -> Unknown; all unreadable -> Unknown.
+        // No certificates at all -> Unknown; all unreadable -> Unknown.
         assert_eq!(
-            cert_expiry_metric(&[], &thr, na).status,
+            cert_expiry_metric(&[], 0, &thr).status,
             HealthStatus::Unknown
         );
         assert_eq!(
-            cert_expiry_metric(&[("/x".to_string(), None)], &thr, na).status,
+            cert_expiry_metric(&[], 1, &thr).status,
             HealthStatus::Unknown
         );
-        // One unreadable + one good -> uses the good one, notes the unreadable.
-        let mixed = cert_expiry_metric(
-            &[("/x".to_string(), None), cert("/ok")],
-            &thr,
-            na - 30 * day,
-        );
+        // One unreadable path + one good cert -> uses the good one, notes the unreadable.
+        let mixed = cert_expiry_metric(&[cert("ok", 30)], 1, &thr);
         assert_eq!(mixed.status, HealthStatus::Ok);
         assert!(mixed.detail.contains("unreadable"), "{}", mixed.detail);
     }

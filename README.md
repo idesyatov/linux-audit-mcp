@@ -200,7 +200,7 @@ strict_host_key = "accept-new"   # yes | accept-new (default) | no
 connect_timeout_secs = 10        # default 10
 command_timeout_secs = 30        # default 30
 profile = "hardened"             # optional: baseline (default) | hardened
-cert_paths = ["/etc/letsencrypt/live/example.com/fullchain.pem"]  # optional: TLS certs to watch (health-cert-expiry); must be readable by `user`
+cert_paths = ["/etc/letsencrypt/live/example.com/fullchain.pem"]  # OPTIONAL: extra TLS certs to watch (health-cert-expiry). On a privileged host certbot certs are auto-discovered — this is only for non-certbot/manual certs; must be readable by `user`
 ```
 
 `$LINUX_AUDIT_IDENTITY_FILE`, if set, overrides `identity_file` for every target
@@ -712,9 +712,9 @@ reported `UNKNOWN` and never gates.
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
 | `health-listen-overflows` | `cat /proc/net/netstat` (×2, ~1s apart) | TCP accept-queue overflow rate (events/s) ≥ `listen_overflow_warn_pps`/`_crit_pps` (server not accepting fast enough) |
 | `health-tcp-errors`   | `cat /proc/net/snmp` + `/proc/net/netstat` (×2, ~1s apart) | TCP stack pressure rate (events/s) ≥ `tcp_err_warn_pps`/`tcp_err_crit_pps` — gates on TCPAbortOnMemory+PruneCalled+TCPRcvQDrop (stack shedding connections); retransmit rate shown as context, never gated; since-boot totals as context |
-| `health-cert-expiry`  | `openssl x509 -noout -enddate` per configured `cert_paths` | days until the **nearest** configured TLS cert expires ≤ `cert_expiry_warn_days`/`cert_expiry_crit_days` (expired → Crit); n/a if no `cert_paths` configured. Certs must be readable by the SSH user |
+| `health-cert-expiry` 🔑 | `sudo -n certbot certificates` (+ optional `cert_paths` via `openssl`) | days until the **nearest** TLS cert expires ≤ `cert_expiry_warn_days`/`cert_expiry_crit_days` (expired → Crit). On a privileged host **auto-discovers** every certbot/Let's Encrypt cert — no config needed; `cert_paths` is an optional supplement for non-certbot/manual certs. n/a if nothing found |
 | `health-clock-sync`   | `timedatectl show`                         | `NTPSynchronized=no` → Warn (clock unsynced — breaks TLS windows / logs / time-based auth); n/a if not reported |
-| `health-reboot-required` | `ls /run`                               | Debian/Ubuntu `/run/reboot-required` present → Warn (kernel/libraries updated, host running the old code). Debian-family only |
+| `health-reboot-required` | `ls /run`; `uname -r` + `rpm -q --last kernel` | pending reboot → Warn. Debian/Ubuntu: the `/run/reboot-required` flag. RHEL/Rocky: the running kernel is older than the newest installed (kernel updates only; userspace lib updates aren't detected) |
 | `health-fs-readonly`  | `cat /proc/mounts`                         | a normally-writable disk filesystem (ext*/xfs/btrfs…) mounted **read-only** → Crit (the kernel remounts `ro` after disk errors — writes silently fail). Read-only-by-design filesystems (squashfs snaps, iso9660) and pseudo/overlay/tmpfs are excluded |
 
 The text report's headline is a **diagnosis**: the overall status followed by a
