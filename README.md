@@ -276,6 +276,7 @@ tcp_err_warn_pps = 1.0    # TCP stack pressure rate (events/s): abort-on-mem+pru
 tcp_err_crit_pps = 10.0
 net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat + nf_conntrack + snmp samples
 failed_units_crit = 0     # failed systemd services: any → Warn; ≥ this count → Crit (0 = never Crit)
+zombie_crit = 0           # zombie (defunct) processes: any → Warn; ≥ this count → Crit (0 = never Crit)
 top_n = 5                 # hot processes listed per resource
 ```
 

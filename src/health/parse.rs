@@ -441,7 +441,8 @@ pub struct KernelEventCategory {
 /// Result of scanning the kernel ring buffer for curated failure signatures.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KernelEvents {
-    /// Matched categories, in signature order (only non-empty ones appear).
+    /// Matched categories, in order of first appearance in the log (only
+    /// categories with at least one match appear).
     pub categories: Vec<KernelEventCategory>,
 }
 
