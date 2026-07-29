@@ -93,6 +93,11 @@ pub struct AuditArgs {
     #[arg(long)]
     diff: bool,
 
+    /// With `--diff`, compare against the Nth most recent prior audit instead of
+    /// the immediately previous one (1 = previous, 2 = the one before, ...).
+    #[arg(long, value_name = "N", default_value = "1")]
+    against: usize,
+
     /// Do not append this audit to the on-disk history (used by `--diff`).
     #[arg(long)]
     no_store: bool,
@@ -127,10 +132,15 @@ pub struct HealthArgs {
 }
 
 #[derive(Args)]
+#[command(group(ArgGroup::new("history_sel").required(true).args(["target", "group"])))]
 pub struct HistoryArgs {
     /// Target alias whose recorded history to show.
     #[arg(long)]
-    target: String,
+    target: Option<String>,
+
+    /// Group name from the config; shows the history of every member (or `all`).
+    #[arg(long)]
+    group: Option<String>,
 
     /// Show at most this many most-recent snapshots (0 for all).
     #[arg(long, default_value = "20")]
@@ -300,9 +310,20 @@ pub async fn run_audit(args: AuditArgs) -> anyhow::Result<i32> {
             .filter_map(|o| {
                 let (score, findings) = o.result.as_ref().ok()?;
                 let cur = history::AuditSnapshot::from_audit(score, findings, 0);
-                let prev = history::read_recent_audit(&o.alias, 1)
-                    .ok()
-                    .and_then(|mut v| v.pop());
+                // Read the N newest prior snapshots (oldest -> newest); the first is
+                // the Nth most recent = the requested baseline. `against` runs before
+                // this run is recorded, so the stored newest is the previous run.
+                let n = args.against.max(1);
+                let hist = history::read_recent_audit(&o.alias, n).ok()?;
+                if !hist.is_empty() && hist.len() < n {
+                    eprintln!(
+                        "note: requested {n} audit(s) back for '{}', but only {} stored; \
+                         diffing against the oldest",
+                        o.alias,
+                        hist.len()
+                    );
+                }
+                let prev = hist.into_iter().next();
                 Some((o.alias.clone(), prev.map(|p| history::audit_diff(&p, &cur))))
             })
             .collect()
@@ -430,32 +451,46 @@ pub async fn run_health(args: HealthArgs) -> anyhow::Result<i32> {
 /// only (no SSH); the alias is validated against the config to catch typos.
 pub fn run_history(args: HistoryArgs) -> anyhow::Result<i32> {
     let cfg = load_config(&args.config)?;
-    if !cfg.targets.contains_key(&args.target) {
-        anyhow::bail!("unknown target {:?}", args.target);
+    let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
+    let mut entries = Vec::with_capacity(aliases.len());
+    for alias in &aliases {
+        if !cfg.targets.contains_key(alias) {
+            anyhow::bail!("unknown target {alias:?}");
+        }
+        let snaps = history::read_recent(alias, args.limit)
+            .with_context(|| format!("reading health history for {alias:?}"))?;
+        entries.push((alias.clone(), snaps));
     }
-    let snaps = history::read_recent(&args.target, args.limit)
-        .with_context(|| format!("reading health history for {:?}", args.target))?;
-    match args.format {
-        Format::Text => print!("{}", history::text(&args.target, &snaps)),
-        Format::Json => println!("{}", history::json(&args.target, &snaps)?),
-        Format::Sarif => anyhow::bail!("SARIF format is only supported by `audit`"),
+    match (&group, args.format) {
+        (_, Format::Sarif) => anyhow::bail!("SARIF format is only supported by `audit`"),
+        (Some(g), Format::Text) => print!("{}", history::group_text(g, &entries)),
+        (Some(g), Format::Json) => println!("{}", history::group_json(g, &entries)?),
+        (None, Format::Text) => print!("{}", history::text(&entries[0].0, &entries[0].1)),
+        (None, Format::Json) => println!("{}", history::json(&entries[0].0, &entries[0].1)?),
     }
     Ok(0)
 }
 
-/// Print the recorded security-audit history for a target (score trend). Reads
-/// local files only (no SSH); the alias is validated against the config.
+/// Print the recorded security-audit history for a target or group (score trend).
+/// Reads local files only (no SSH); each alias is validated against the config.
 pub fn run_audit_history(args: HistoryArgs) -> anyhow::Result<i32> {
     let cfg = load_config(&args.config)?;
-    if !cfg.targets.contains_key(&args.target) {
-        anyhow::bail!("unknown target {:?}", args.target);
+    let (aliases, group) = select(&cfg, args.target.as_deref(), args.group.as_deref())?;
+    let mut entries = Vec::with_capacity(aliases.len());
+    for alias in &aliases {
+        if !cfg.targets.contains_key(alias) {
+            anyhow::bail!("unknown target {alias:?}");
+        }
+        let snaps = history::read_recent_audit(alias, args.limit)
+            .with_context(|| format!("reading audit history for {alias:?}"))?;
+        entries.push((alias.clone(), snaps));
     }
-    let snaps = history::read_recent_audit(&args.target, args.limit)
-        .with_context(|| format!("reading audit history for {:?}", args.target))?;
-    match args.format {
-        Format::Text => print!("{}", history::audit_text(&args.target, &snaps)),
-        Format::Json => println!("{}", history::audit_json(&args.target, &snaps)?),
-        Format::Sarif => anyhow::bail!("SARIF format is only supported by `audit`"),
+    match (&group, args.format) {
+        (_, Format::Sarif) => anyhow::bail!("SARIF format is only supported by `audit`"),
+        (Some(g), Format::Text) => print!("{}", history::audit_group_text(g, &entries)),
+        (Some(g), Format::Json) => println!("{}", history::audit_group_json(g, &entries)?),
+        (None, Format::Text) => print!("{}", history::audit_text(&entries[0].0, &entries[0].1)),
+        (None, Format::Json) => println!("{}", history::audit_json(&entries[0].0, &entries[0].1)?),
     }
     Ok(0)
 }
@@ -486,12 +521,31 @@ mod tests {
                 assert_eq!(a.target.as_deref(), Some("web"));
                 assert!(a.group.is_none());
                 assert!(matches!(a.fail_on, FailOn::High)); // secure default
+                assert_eq!(a.against, 1); // diff baseline defaults to the previous run
             }
             _ => panic!("expected audit subcommand"),
         }
         let g = Cli::try_parse_from(["linux-audit-mcp", "audit", "--group", "mtproto"]).unwrap();
         match g.command {
             Some(Command::Audit(a)) => assert_eq!(a.group.as_deref(), Some("mtproto")),
+            _ => panic!("expected audit subcommand"),
+        }
+        // --diff --against N selects an older baseline.
+        let d = Cli::try_parse_from([
+            "linux-audit-mcp",
+            "audit",
+            "--target",
+            "web",
+            "--diff",
+            "--against",
+            "3",
+        ])
+        .unwrap();
+        match d.command {
+            Some(Command::Audit(a)) => {
+                assert!(a.diff);
+                assert_eq!(a.against, 3);
+            }
             _ => panic!("expected audit subcommand"),
         }
     }
@@ -627,13 +681,29 @@ mod tests {
         let cli = Cli::try_parse_from(["linux-audit-mcp", "history", "--target", "web"]).unwrap();
         match cli.command {
             Some(Command::History(a)) => {
-                assert_eq!(a.target, "web");
+                assert_eq!(a.target.as_deref(), Some("web"));
+                assert!(a.group.is_none());
                 assert_eq!(a.limit, 20); // default
             }
             _ => panic!("expected history subcommand"),
         }
-        // --target is required.
+        // --group is accepted too.
+        let g = Cli::try_parse_from(["linux-audit-mcp", "history", "--group", "mtproto"]).unwrap();
+        match g.command {
+            Some(Command::History(a)) => assert_eq!(a.group.as_deref(), Some("mtproto")),
+            _ => panic!("expected history subcommand"),
+        }
+        // exactly one of --target/--group is required.
         assert!(Cli::try_parse_from(["linux-audit-mcp", "history"]).is_err());
+        assert!(Cli::try_parse_from([
+            "linux-audit-mcp",
+            "history",
+            "--target",
+            "web",
+            "--group",
+            "mtproto"
+        ])
+        .is_err());
     }
 
     #[test]

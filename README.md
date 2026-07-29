@@ -331,13 +331,15 @@ docker run --rm \
 | `--fail-on`    | Exit 2 if any failed check is ≥ this severity. `off` disables. Default `high`. |
 | `--fail-under` | Exit 2 if the total score is below this value (0–100).              |
 | `--diff`       | After the report, show what changed vs this target's previous audit (rendered as text, or JSON with `--format json`). |
+| `--against`    | With `--diff`, compare against the Nth most recent prior audit (1 = previous, the default). |
 | `--no-store`   | Don't append this audit to the on-disk history.                     |
 
 Every audit is recorded per target (append-only JSONL, next to the health history;
 `--no-store` opts out). `--diff` then compares this run to the previous stored
 snapshot and prints the **score delta**, **regressions** (checks that started
 failing) and **fixes** (checks that started passing) — so a security regression over
-time is obvious. Example: `audit --target web --diff`.
+time is obvious. Example: `audit --target web --diff`. Use `--against N` to compare
+against an older baseline (e.g. `--diff --against 5` = five audits ago).
 
 `--check`/`--domain` select a subset (union of the two); `--skip` removes ids from
 it. An unknown id or domain is an error (typo protection). When any of the three is
@@ -389,6 +391,7 @@ append-only JSONL file per target — one line per run — so you can inspect tr
 ```bash
 linux-audit-mcp history --target web              # text table (or --format json)
 linux-audit-mcp history --target web --limit 50
+linux-audit-mcp history --group mtproto           # every member of the group
 ```
 
 Audits are recorded the same way (`<alias>.audit.jsonl`); `audit-history` prints
@@ -396,11 +399,16 @@ the recorded **score trend** (time, profile, score, pass/fail/skip/error counts)
 
 ```bash
 linux-audit-mcp audit-history --target web         # or --format json
+linux-audit-mcp audit-history --group mtproto      # every member of the group
 ```
+
+Both `history` and `audit-history` accept `--group <name>` (or `all`) to print the
+recorded trend for every member of a group in one call.
 
 | Option     | Description                                                          |
 | ---------- | ------------------------------------------------------------------- |
-| `--target` | Target alias whose recorded history to show (required).             |
+| `--target` | Target alias whose recorded history to show (exactly one of `--target`/`--group`). |
+| `--group`  | Group name (or `all`); shows the history of every member.           |
 | `--limit`  | Most-recent snapshots to show (default `20`; `0` for all).          |
 | `--format` | `text` (default) \| `json`.                                         |
 | `--config` | Path to `targets.toml` (else `$LINUX_AUDIT_CONFIG` / default).      |

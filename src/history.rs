@@ -292,6 +292,41 @@ pub fn json(alias: &str, snaps: &[Snapshot]) -> serde_json::Result<String> {
     }))
 }
 
+/// Health history for every member of a group: the per-host text sections, each
+/// already headed by its alias, under one group heading.
+pub fn group_text(group: &str, entries: &[(String, Vec<Snapshot>)]) -> String {
+    let mut out = format!(
+        "Health history for group '{group}' ({} host(s))\n\n",
+        entries.len()
+    );
+    for (alias, snaps) in entries {
+        out.push_str(&text(alias, snaps));
+        out.push('\n');
+    }
+    out
+}
+
+/// Machine-readable group history: `{ group, kind: "health-history-group", hosts }`
+/// where each host mirrors the single-target [`json`] object.
+pub fn group_json(group: &str, entries: &[(String, Vec<Snapshot>)]) -> serde_json::Result<String> {
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|(alias, snaps)| {
+            serde_json::json!({
+                "target": alias,
+                "kind": "health-history",
+                "count": snaps.len(),
+                "snapshots": snaps,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "group": group,
+        "kind": "health-history-group",
+        "hosts": hosts,
+    }))
+}
+
 // ---- audit snapshots + run-over-run diff --------------------------------
 
 /// One persisted security-audit reading: when it was taken, the overall score,
@@ -607,6 +642,43 @@ pub fn audit_json(alias: &str, snaps: &[AuditSnapshot]) -> serde_json::Result<St
     }))
 }
 
+/// Audit history for every member of a group: the per-host text sections under one
+/// group heading.
+pub fn audit_group_text(group: &str, entries: &[(String, Vec<AuditSnapshot>)]) -> String {
+    let mut out = format!(
+        "Audit history for group '{group}' ({} host(s))\n\n",
+        entries.len()
+    );
+    for (alias, snaps) in entries {
+        out.push_str(&audit_text(alias, snaps));
+        out.push('\n');
+    }
+    out
+}
+
+/// Machine-readable group audit history: `{ group, kind: "audit-history-group", hosts }`.
+pub fn audit_group_json(
+    group: &str,
+    entries: &[(String, Vec<AuditSnapshot>)],
+) -> serde_json::Result<String> {
+    let hosts: Vec<_> = entries
+        .iter()
+        .map(|(alias, snaps)| {
+            serde_json::json!({
+                "target": alias,
+                "kind": "audit-history",
+                "count": snaps.len(),
+                "snapshots": snaps,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "group": group,
+        "kind": "audit-history-group",
+        "hosts": hosts,
+    }))
+}
+
 /// Machine-readable audit diff: `{ target, kind: "audit-diff", diff }`. `diff` is
 /// `null` when there is no prior snapshot to compare against.
 pub fn audit_diff_json(alias: &str, diff: Option<&AuditDiff>) -> serde_json::Result<String> {
@@ -656,6 +728,25 @@ mod tests {
             failed_units: Vec::new(),
             event_counters: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn group_json_wraps_each_host() {
+        let entries = vec![
+            ("mt1".to_string(), vec![snap(1, 0.1), snap(2, 0.2)]),
+            ("mt2".to_string(), vec![snap(1, 0.3)]),
+        ];
+        let out = group_json("mtproto", &entries).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["group"], "mtproto");
+        assert_eq!(v["kind"], "health-history-group");
+        assert_eq!(v["hosts"].as_array().unwrap().len(), 2);
+        assert_eq!(v["hosts"][0]["target"], "mt1");
+        assert_eq!(v["hosts"][0]["count"], 2);
+        // text form names the group and every host.
+        let t = group_text("mtproto", &entries);
+        assert!(t.contains("group 'mtproto'"));
+        assert!(t.contains("mt1") && t.contains("mt2"));
     }
 
     #[test]
