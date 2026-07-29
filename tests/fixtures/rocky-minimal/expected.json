@@ -6,6 +6,8 @@
     "ssh-password-authentication": "fail",
     "ssh-permit-empty-passwords": "pass",
     "ssh-x11-forwarding": "fail",
+    "ssh-agent-forwarding": "fail",
+    "ssh-tcp-forwarding": "fail",
     "ssh-max-auth-tries": "pass",
     "ssh-login-grace-time": "fail",
     "ssh-client-alive-interval": "fail",
@@ -32,6 +34,8 @@
     "kernel-unprivileged-bpf": "fail",
     "kernel-mount-options": "fail",
     "kernel-suid-binaries": "fail",
+    "kernel-world-writable-files": "fail",
+    "kernel-cron-writable": "pass",
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "pass",
     "firewall-iptables-default-deny": "pass",
@@ -45,7 +49,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 20,
+    "baseline": 16,
     "hardened": 0
   }
 }

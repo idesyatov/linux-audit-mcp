@@ -114,6 +114,16 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // stdout is still authoritative for what was found). Read-only: `find`
     // without an action only prints.
     "sudo -n find / -xdev -perm -4000 -type f",
+    // World-writable regular files on the root filesystem (`-perm -0002`, `-type f`).
+    // A world-writable file anyone can overwrite is a tampering/backdoor vector;
+    // `-type f` skips world-writable dirs (e.g. sticky /tmp), which are benign.
+    // Same `-xdev`/tolerate-nonzero discipline as the SUID scan.
+    "sudo -n find / -xdev -type f -perm -0002",
+    // World-writable cron drop-in directories: a writable /etc/cron.d (etc.) lets
+    // any local user schedule a root command. Literal paths (no glob, which the
+    // catalog forbids); `-type d` so this doesn't overlap the world-writable-files
+    // scan. Missing paths just error per-path (tolerated); read-only.
+    "sudo -n find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly -type d -perm -0002",
     // Effective SSH config: `sshd -T` dumps the *resolved* directives (compiled
     // defaults + Match blocks). On an opted-in target its output supersedes the
     // file read for every ssh-domain check, making them authoritative.

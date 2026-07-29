@@ -373,6 +373,120 @@ impl Check for SuidBinaries {
     }
 }
 
+/// Format a list of found paths for a finding, bounding the length so a
+/// pathological result can't produce an enormous message.
+fn summarize_paths(paths: &[&str]) -> String {
+    const MAX: usize = 15;
+    if paths.len() <= MAX {
+        paths.join(", ")
+    } else {
+        format!(
+            "{}, ... (+{} more)",
+            paths[..MAX].join(", "),
+            paths.len() - MAX
+        )
+    }
+}
+
+/// World-writable regular files exist on the root filesystem - any local user can
+/// overwrite them (tampering, or a backdoor if the file is executed/sourced by a
+/// privileged process). Privileged: the scan runs as root so it sees every
+/// directory; a whole-filesystem scan may exit non-zero on a transient per-path
+/// error, which this check tolerates.
+pub struct WorldWritableFiles;
+
+impl Check for WorldWritableFiles {
+    fn id(&self) -> &'static str {
+        "kernel-world-writable-files"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Kernel
+    }
+    fn title(&self) -> &'static str {
+        "World-writable files"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Remove world write from each unless deliberately shared: chmod o-w <path>. \
+         A world-writable file any user can overwrite is a tampering/backdoor vector."
+    }
+    fn command(&self) -> &'static str {
+        "sudo -n find / -xdev -type f -perm -0002"
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn tolerate_nonzero_exit(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let found: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if found.is_empty() {
+            Outcome::pass("No world-writable files on the root filesystem.")
+        } else {
+            Outcome::fail(format!(
+                "World-writable files: {}.",
+                summarize_paths(&found)
+            ))
+        }
+    }
+}
+
+/// A cron drop-in directory is world-writable - any local user can schedule a
+/// command that runs as root. Checks the standard literal cron paths (a glob would
+/// be rejected by the catalog); `-type d` targets the directories specifically, so
+/// it doesn't overlap the world-writable-files scan. Privileged, root-only read.
+pub struct CronWritable;
+
+impl Check for CronWritable {
+    fn id(&self) -> &'static str {
+        "kernel-cron-writable"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Kernel
+    }
+    fn title(&self) -> &'static str {
+        "World-writable cron directories"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Restrict to root: chmod o-w <dir> (cron directories should be 0755). A \
+         world-writable cron directory lets any local user run commands as root."
+    }
+    fn command(&self) -> &'static str {
+        "sudo -n find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly -type d -perm -0002"
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn tolerate_nonzero_exit(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let found: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if found.is_empty() {
+            Outcome::pass("No world-writable cron directories.")
+        } else {
+            Outcome::fail(format!(
+                "World-writable cron directories: {}.",
+                found.join(", ")
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -392,6 +506,37 @@ mod tests {
         let out = SuidBinaries.evaluate(bad);
         assert_eq!(out.status, Status::Fail);
         assert!(out.detail.contains("/tmp/.hidden/rootshell"));
+    }
+
+    #[test]
+    fn world_writable_files() {
+        assert!(WorldWritableFiles.privileged());
+        assert!(WorldWritableFiles.tolerate_nonzero_exit());
+        // Empty scan -> pass.
+        assert_eq!(WorldWritableFiles.evaluate("").status, Status::Pass);
+        // A world-writable file -> fail, naming the path.
+        let out = WorldWritableFiles.evaluate("/var/www/uploads/shell.php\n");
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("/var/www/uploads/shell.php"));
+    }
+
+    #[test]
+    fn cron_writable() {
+        assert!(CronWritable.privileged());
+        assert!(CronWritable.tolerate_nonzero_exit());
+        assert_eq!(CronWritable.evaluate("").status, Status::Pass);
+        let out = CronWritable.evaluate("/etc/cron.d\n");
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("/etc/cron.d"));
+    }
+
+    #[test]
+    fn world_writable_output_is_bounded() {
+        // Many findings are truncated with a "+N more" suffix.
+        let many: String = (0..30).map(|i| format!("/w/f{i}\n")).collect();
+        let out = WorldWritableFiles.evaluate(&many);
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("more"), "{}", out.detail);
     }
 
     #[test]

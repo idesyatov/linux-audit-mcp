@@ -178,6 +178,86 @@ impl Check for X11Forwarding {
     }
 }
 
+/// SSH agent forwarding is enabled (`AllowAgentForwarding yes`). A forwarded agent
+/// on a shared/bastion host can be hijacked by anyone who can reach its socket.
+pub struct AllowAgentForwarding;
+
+impl Check for AllowAgentForwarding {
+    fn id(&self) -> &'static str {
+        "ssh-agent-forwarding"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "SSH agent forwarding enabled"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Disable unless this host must forward agents: AllowAgentForwarding no."
+    }
+    fn command(&self) -> &'static str {
+        SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // OpenSSH default is yes.
+        let v = directive(output, "allowagentforwarding", "yes");
+        if v == "no" {
+            Outcome::pass("AllowAgentForwarding is no.")
+        } else {
+            Outcome::fail(format!(
+                "AllowAgentForwarding is '{v}' (a forwarded agent can be hijacked)."
+            ))
+        }
+    }
+}
+
+/// SSH TCP forwarding is enabled (`AllowTcpForwarding` is not `no`). Lets a client
+/// tunnel arbitrary connections through the host, pivoting into the internal
+/// network. The directive also takes `local`/`remote`/`all`, all of which permit
+/// forwarding, so only an explicit `no` passes.
+pub struct AllowTcpForwarding;
+
+impl Check for AllowTcpForwarding {
+    fn id(&self) -> &'static str {
+        "ssh-tcp-forwarding"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "SSH TCP forwarding enabled"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Low
+    }
+    fn recommendation(&self) -> &'static str {
+        "Disable unless this host must tunnel connections: AllowTcpForwarding no."
+    }
+    fn command(&self) -> &'static str {
+        SSHD_CMD
+    }
+    fn effective_command(&self) -> Option<&'static str> {
+        Some(SSHD_EFFECTIVE_CMD)
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        // OpenSSH default is yes; local/remote/all also permit forwarding.
+        let v = directive(output, "allowtcpforwarding", "yes");
+        if v == "no" {
+            Outcome::pass("AllowTcpForwarding is no.")
+        } else {
+            Outcome::fail(format!(
+                "AllowTcpForwarding is '{v}' (clients can tunnel into the network)."
+            ))
+        }
+    }
+}
+
 /// `MaxAuthTries` allows too many authentication attempts per connection.
 pub struct MaxAuthTries;
 
@@ -447,6 +527,8 @@ mod tests {
         PasswordAuthentication no\n\
         PermitEmptyPasswords no\n\
         X11Forwarding no\n\
+        AllowAgentForwarding no\n\
+        AllowTcpForwarding no\n\
         MaxAuthTries 3\n\
         Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com\n\
         MACs hmac-sha2-512-etm@openssh.com\n\
@@ -456,6 +538,8 @@ mod tests {
         PasswordAuthentication yes\n\
         PermitEmptyPasswords yes\n\
         X11Forwarding yes\n\
+        AllowAgentForwarding yes\n\
+        AllowTcpForwarding all\n\
         MaxAuthTries 10\n\
         Ciphers aes256-ctr,aes128-cbc,3des-cbc\n\
         MACs hmac-sha2-256,hmac-md5\n\
@@ -500,6 +584,23 @@ mod tests {
         assert_eq!(X11Forwarding.evaluate(OPEN).status, Status::Fail);
         // Default is no.
         assert_eq!(X11Forwarding.evaluate(DEFAULTS).status, Status::Pass);
+    }
+
+    #[test]
+    fn agent_forwarding() {
+        assert_eq!(AllowAgentForwarding.evaluate(HARDENED).status, Status::Pass);
+        assert_eq!(AllowAgentForwarding.evaluate(OPEN).status, Status::Fail);
+        // OpenSSH default is yes -> a stock config fails.
+        assert_eq!(AllowAgentForwarding.evaluate(DEFAULTS).status, Status::Fail);
+    }
+
+    #[test]
+    fn tcp_forwarding() {
+        assert_eq!(AllowTcpForwarding.evaluate(HARDENED).status, Status::Pass);
+        // `all` (and local/remote) permit forwarding -> fail.
+        assert_eq!(AllowTcpForwarding.evaluate(OPEN).status, Status::Fail);
+        // OpenSSH default is yes -> a stock config fails.
+        assert_eq!(AllowTcpForwarding.evaluate(DEFAULTS).status, Status::Fail);
     }
 
     #[test]

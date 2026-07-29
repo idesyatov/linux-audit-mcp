@@ -211,6 +211,8 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(ssh::PasswordAuthentication),
         Box::new(ssh::PermitEmptyPasswords),
         Box::new(ssh::X11Forwarding),
+        Box::new(ssh::AllowAgentForwarding),
+        Box::new(ssh::AllowTcpForwarding),
         Box::new(ssh::MaxAuthTries),
         Box::new(ssh::LoginGraceTime),
         Box::new(ssh::ClientAliveInterval),
@@ -238,7 +240,9 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(kernel::SuidDumpable),
         Box::new(kernel::UnprivilegedBpf),
         Box::new(kernel::MountOptions),
-        Box::new(kernel::SuidBinaries), // privileged (sudo)
+        Box::new(kernel::SuidBinaries),       // privileged (sudo)
+        Box::new(kernel::WorldWritableFiles), // privileged (sudo)
+        Box::new(kernel::CronWritable),       // privileged (sudo)
         // firewall
         Box::new(firewall::FirewallEnabled),
         Box::new(firewall::NftDefaultDeny), // privileged (sudo)

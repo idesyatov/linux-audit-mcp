@@ -1,0 +1,2 @@
+/var/tmp/uploads/report.sh
+/srv/share/config.ini
