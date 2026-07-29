@@ -181,6 +181,7 @@ mod tests {
             changes: Vec::new(),
             container_uptimes: BTreeMap::new(),
             failed_units: Vec::new(),
+            event_counters: BTreeMap::new(),
         }
     }
 
@@ -198,6 +199,7 @@ mod tests {
                     metrics: m,
                     containers: BTreeMap::new(),
                     failed_units: Vec::new(),
+                    event_counters: BTreeMap::new(),
                 }
             })
             .collect()

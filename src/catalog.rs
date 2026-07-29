@@ -82,6 +82,11 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // table was full enough to evict entries - the NAT/firewall/proxy dropping
     // connections. Unprivileged, read-only.
     "cat /proc/net/stat/nf_conntrack",
+    // TCP stack pressure counters (SNMP MIB); sampled twice for the error rate.
+    // /proc/net/snmp holds `Tcp: RetransSegs` (retransmits) for context;
+    // /proc/net/netstat holds `TcpExt:` TCPAbortOnMemory/PruneCalled/TCPRcvQDrop -
+    // the stack shedding connections under memory/backlog pressure. Unprivileged.
+    "cat /proc/net/snmp",
     // CPU/IO pressure: `1 2` = one 1-second sample; the last row is
     // the current delta. Unprivileged and read-only.
     "vmstat 1 2",

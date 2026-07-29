@@ -74,6 +74,10 @@ const NETSTAT: &str = "cat /proc/net/netstat";
 /// [`NETDEV`]) for the connection-drop rate. Handled in [`collect`], not
 /// [`evaluate`]. Unprivileged.
 const CONNTRACK_STAT: &str = "cat /proc/net/stat/nf_conntrack";
+/// TCP SNMP MIB counters (`Tcp: RetransSegs`); sampled twice (alongside
+/// [`NETDEV`]) for the retransmit rate shown as context on `health-tcp-errors`.
+/// Handled in [`collect`], not [`evaluate`]. Unprivileged.
+const SNMP: &str = "cat /proc/net/snmp";
 
 /// Commands snapped exactly once per snapshot.
 const SINGLE_SHOT: &[&str] = &[
@@ -123,6 +127,7 @@ pub const HEALTH_COMMANDS: &[&str] = &[
     NETDEV,
     NETSTAT,
     CONNTRACK_STAT,
+    SNMP,
 ];
 
 /// The wire command for a container probe: on a `privileged` target the `sudo -n`
@@ -243,6 +248,12 @@ pub struct HealthReport {
     /// flag a unit that newly failed. Internal state, not part of the wire report.
     #[serde(skip)]
     pub failed_units: Vec<String>,
+    /// Cumulative since-boot event counters (conntrack table-pressure total, kernel
+    /// log event counts per category), carried to history so the next run can report
+    /// how many new events accrued since the last check. Internal state, not part of
+    /// the wire report.
+    #[serde(skip)]
+    pub event_counters: BTreeMap<String, u64>,
 }
 
 /// Thresholds for turning raw readings into `Ok`/`Warn`/`Crit`. Each field has a
@@ -301,6 +312,12 @@ pub struct Thresholds {
     /// rate means the conntrack table is full and dropping connections.
     pub conntrack_drop_warn_pps: f64,
     pub conntrack_drop_crit_pps: f64,
+    /// TCP stack error rate (events/s) over the sample window (`health-tcp-errors`).
+    /// Gates on memory/backlog-pressure counters (TCPAbortOnMemory + PruneCalled +
+    /// TCPRcvQDrop), which hold at 0 on a healthy host; retransmits are noisy on any
+    /// internet-facing host and are shown as context only, never gated.
+    pub tcp_err_warn_pps: f64,
+    pub tcp_err_crit_pps: f64,
     /// Gap between the two `/proc/net/dev` samples, in seconds.
     pub net_sample_secs: u64,
     /// Failed systemd services: any failed unit is a `Warn`; this many or more
@@ -346,6 +363,8 @@ impl Default for Thresholds {
             listen_overflow_crit_pps: 10.0,
             conntrack_drop_warn_pps: 1.0,
             conntrack_drop_crit_pps: 10.0,
+            tcp_err_warn_pps: 1.0,
+            tcp_err_crit_pps: 10.0,
             net_sample_secs: 1,
             failed_units_crit: 0,
             zombie_crit: 0,
@@ -1102,6 +1121,119 @@ fn net_conntrack_drops_metric(s1: &str, s2: &str, dt_secs: f64, thr: &Thresholds
     }
 }
 
+/// Rate of TCP stack pressure events over the sample window. `TcpExt`
+/// (`/proc/net/netstat`) exposes `TCPAbortOnMemory` (connection aborted, no
+/// memory), `PruneCalled` (receive queue pruned under pressure) and `TCPRcvQDrop`
+/// (segment dropped from a full receive queue) - the stack shedding connections,
+/// the failure this metric watches for. It gates on their sum; retransmits
+/// (`Tcp: RetransSegs` from `/proc/net/snmp`) tick routinely on any internet-facing
+/// host (packet loss, not host pressure), so - like the generic conntrack `drop` -
+/// they are shown as context but never gate. A healthy host holds the gated rate at
+/// 0; the since-boot totals answer "did the stack shed connections this boot?".
+/// Missing/unparseable `TcpExt` reports `Unknown`.
+fn net_tcp_errors_metric(
+    snmp1: &str,
+    snmp2: &str,
+    stat1: &str,
+    stat2: &str,
+    dt_secs: f64,
+    thr: &Thresholds,
+) -> Metric {
+    const ID: &str = "health-tcp-errors";
+    const TITLE: &str = "TCP stack errors";
+    if dt_secs <= 0.0 {
+        return unknown(ID, TITLE, "no measurable interval between samples");
+    }
+    let (Some((a1, p1, q1)), Some((a2, p2, q2))) = (
+        parse::parse_netstat_tcp_errors(stat1),
+        parse::parse_netstat_tcp_errors(stat2),
+    ) else {
+        return unknown(ID, TITLE, "netstat TcpExt counters unavailable");
+    };
+    // Gate on memory/backlog-pressure events only.
+    let pressure1 = a1 + p1 + q1;
+    let pressure2 = a2 + p2 + q2;
+    // saturating: a counter reset (reboot) yields 0 rather than a spike.
+    let rate = pressure2.saturating_sub(pressure1) as f64 / dt_secs;
+    // Retransmits are context (network loss, not host pressure); absent SNMP just
+    // omits the note.
+    let retrans_ctx = match (parse::parse_snmp_tcp(snmp1), parse::parse_snmp_tcp(snmp2)) {
+        (Some(r1), Some(r2)) => {
+            format!(", retrans {:.1}/s", r2.saturating_sub(r1) as f64 / dt_secs)
+        }
+        _ => String::new(),
+    };
+    let since_boot = format!("since boot: abort-on-mem {a2}, prune {p2}, rcvq-drop {q2}");
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(rate, thr.tcp_err_warn_pps, thr.tcp_err_crit_pps),
+        value: if rate > 0.0 {
+            format!("{rate:.1} tcp-err/s ({since_boot})")
+        } else {
+            format!("no TCP stack errors ({since_boot})")
+        },
+        detail: format!("over {dt_secs:.1}s; {since_boot}{retrans_ctx}"),
+        numeric: Some(rate),
+    }
+}
+
+/// Scan the kernel ring buffer (`sudo -n dmesg`, shared with `health-oom`) for a
+/// curated set of failure signatures - filesystem/block-I/O errors, conntrack and
+/// neighbour-table overflows, and hard faults (panic/BUG/oops/soft-lockup/hung-task/
+/// MCE). A hard fault is `Crit`; softer events (FS/table pressure) are `Warn`; a
+/// clean log is `Ok`. Privileged-only, like `health-oom`: absent kernel log (a
+/// non-privileged target) reports `Unknown` and never gates. Best-effort - kernel
+/// wording drifts, so the signature set is conservative (see [`parse::parse_kernel_events`]).
+fn kernel_events_metric(outputs: &Outputs) -> Metric {
+    const ID: &str = "health-kernel-events";
+    const TITLE: &str = "Kernel log events";
+    let Some(text) = out(outputs, OOM_DMESG) else {
+        return unknown(
+            ID,
+            TITLE,
+            "kernel log unavailable (needs privileged sudo -n dmesg)",
+        );
+    };
+    let ev = parse::parse_kernel_events(text);
+    let total = ev.total();
+    if total == 0 {
+        return Metric {
+            id: ID,
+            title: TITLE,
+            status: HealthStatus::Ok,
+            value: "no notable kernel events".to_string(),
+            detail: "no matching failure signatures in the kernel log since boot".to_string(),
+            numeric: Some(0.0),
+        };
+    }
+    let status = if ev.any_critical() {
+        HealthStatus::Crit
+    } else {
+        HealthStatus::Warn
+    };
+    let summary = ev
+        .categories
+        .iter()
+        .map(|c| format!("{} {}", c.count, c.label))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let detail = ev
+        .categories
+        .iter()
+        .map(|c| format!("{}: {}", c.label, c.last_line))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Metric {
+        id: ID,
+        title: TITLE,
+        status,
+        value: format!("{total} kernel event(s) since boot ({summary})"),
+        detail,
+        numeric: Some(total as f64),
+    }
+}
+
 /// Worst status across metrics (`Unknown` is neutral; `Unknown` overall only if
 /// nothing could be measured).
 fn worst(metrics: &[Metric]) -> HealthStatus {
@@ -1129,6 +1261,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(failed_units_metric(outputs, thr));
     metrics.push(zombie_metric(outputs, thr));
     metrics.push(oom_metric(outputs));
+    metrics.push(kernel_events_metric(outputs));
     metrics.push(containers_metric(outputs));
 
     let procs = out(outputs, PS).map(parse::parse_ps).unwrap_or_default();
@@ -1157,6 +1290,17 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
         container_uptimes.extend(parse::parse_container_uptimes(text));
     }
 
+    // Since-boot kernel-event counts per category, carried to history so the next
+    // run can report newly-accrued events. The conntrack table-pressure total is
+    // added in `collect` (it needs the sampled counter file). Absent kernel log
+    // (non-privileged) contributes nothing.
+    let mut event_counters = BTreeMap::new();
+    if let Some(text) = out(outputs, OOM_DMESG) {
+        for c in parse::parse_kernel_events(text).categories {
+            event_counters.insert(format!("kernel: {}", c.label), c.count as u64);
+        }
+    }
+
     HealthReport {
         metrics,
         top_cpu,
@@ -1170,6 +1314,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
         changes: Vec::new(),
         container_uptimes,
         failed_units,
+        event_counters,
     }
 }
 
@@ -1224,12 +1369,14 @@ pub async fn collect(
     // Two timed samples of the counter files -> throughput, error and accept-queue
     // overflow rates. A remote error on the `dev` reads degrades to Unknown metrics;
     // host-level errors abort.
-    let (throughput, errors, listen, conntrack_drops) = match sample_net(ssh, thr).await? {
+    let samples = sample_net(ssh, thr).await?;
+    let (throughput, errors, listen, conntrack_drops, tcp_errors) = match &samples {
         Some(s) => (
             net_throughput_metric(&s.dev1, &s.dev2, s.dt, thr),
             net_errors_metric(&s.dev1, &s.dev2, s.dt, thr),
             net_listen_metric(&s.stat1, &s.stat2, s.dt, thr),
             net_conntrack_drops_metric(&s.ct1, &s.ct2, s.dt, thr),
+            net_tcp_errors_metric(&s.snmp1, &s.snmp2, &s.stat1, &s.stat2, s.dt, thr),
         ),
         None => (
             unknown(
@@ -1252,12 +1399,29 @@ pub async fn collect(
                 "Conntrack drops",
                 "/proc/net/dev unavailable",
             ),
+            unknown(
+                "health-tcp-errors",
+                "TCP stack errors",
+                "/proc/net/dev unavailable",
+            ),
         ),
     };
     report.metrics.push(throughput);
     report.metrics.push(errors);
     report.metrics.push(listen);
     report.metrics.push(conntrack_drops);
+    report.metrics.push(tcp_errors);
+
+    // Cumulative conntrack table-pressure total (early_drop + insert_failed) for the
+    // between-run event delta; the rate metric only carries the intra-run rate.
+    if let Some(s) = &samples {
+        if let Some((_, early, insf)) = parse::parse_conntrack_drops(&s.ct2) {
+            report
+                .event_counters
+                .insert("conntrack table pressure".to_string(), early + insf);
+        }
+    }
+
     report.overall = worst(&report.metrics);
     Ok(report)
 }
@@ -1285,12 +1449,18 @@ struct NetSamples {
     /// remotely (the conntrack-drops metric then reports `Unknown`).
     ct1: String,
     ct2: String,
+    /// `/proc/net/snmp` at each point; empty if that read failed remotely. Only
+    /// feeds the tcp-errors metric's retransmit *context* (it gates on `TcpExt`
+    /// from `netstat`), so an empty read just drops that note.
+    snmp1: String,
+    snmp2: String,
     dt: f64,
 }
 
-/// Read `/proc/net/dev` (and `/proc/net/netstat`) twice, `net_sample_secs` apart.
-/// `Ok(None)` if a `dev` read fails remotely; a failed `netstat` read just leaves
-/// its sample empty (that metric then reports `Unknown`).
+/// Read `/proc/net/dev`, `/proc/net/netstat`, `/proc/net/stat/nf_conntrack` and
+/// `/proc/net/snmp` twice, `net_sample_secs` apart. `Ok(None)` if a `dev` read
+/// fails remotely; a failed read of any other file just leaves its sample empty
+/// (the metric that needs it then reports `Unknown`).
 async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSamples>, SshError> {
     let dev1 = match ssh.run(NETDEV).await {
         Ok(out) => out.stdout,
@@ -1299,6 +1469,7 @@ async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSampl
     };
     let stat1 = run_single(ssh, NETSTAT).await?.unwrap_or_default();
     let ct1 = run_single(ssh, CONNTRACK_STAT).await?.unwrap_or_default();
+    let snmp1 = run_single(ssh, SNMP).await?.unwrap_or_default();
     let start = std::time::Instant::now();
     tokio::time::sleep(std::time::Duration::from_secs(thr.net_sample_secs.max(1))).await;
     let dev2 = match ssh.run(NETDEV).await {
@@ -1308,6 +1479,7 @@ async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSampl
     };
     let stat2 = run_single(ssh, NETSTAT).await?.unwrap_or_default();
     let ct2 = run_single(ssh, CONNTRACK_STAT).await?.unwrap_or_default();
+    let snmp2 = run_single(ssh, SNMP).await?.unwrap_or_default();
     Ok(Some(NetSamples {
         dev1,
         dev2,
@@ -1315,6 +1487,8 @@ async fn sample_net(ssh: &SshConfig, thr: &Thresholds) -> Result<Option<NetSampl
         stat2,
         ct1,
         ct2,
+        snmp1,
+        snmp2,
         dt: start.elapsed().as_secs_f64(),
     }))
 }
@@ -1463,6 +1637,67 @@ mod tests {
             net_conntrack_drops_metric("", "", 1.0, &thr).status,
             HealthStatus::Unknown
         );
+    }
+
+    #[test]
+    fn net_tcp_errors_flags_pressure_not_retransmits() {
+        let thr = Thresholds::default(); // warn 1/s, crit 10/s
+        let ext = "TcpExt: TCPAbortOnMemory PruneCalled TCPRcvQDrop TCPHPHits\n";
+        // Gate = abort + prune + rcvq. s1: 2+1+0=3; s2: 8+4+1=13 -> +10/s -> Crit.
+        let s1 = format!("{ext}TcpExt: 2 1 0 999\n");
+        let s2 = format!("{ext}TcpExt: 8 4 1 999\n");
+        // Retransmits jump hugely but must NOT gate (context only).
+        let snmp1 = "Tcp: RetransSegs InErrs\nTcp: 100 0\n";
+        let snmp2 = "Tcp: RetransSegs InErrs\nTcp: 9999 0\n";
+        let m = net_tcp_errors_metric(snmp1, snmp2, &s1, &s2, 1.0, &thr);
+        assert_eq!(m.status, HealthStatus::Crit);
+        assert_eq!(m.numeric, Some(10.0));
+        assert!(m.detail.contains("retrans"), "{}", m.detail);
+
+        // Only retransmits rising (no pressure delta) -> Ok.
+        let ok = net_tcp_errors_metric(snmp1, snmp2, &s1, &s1, 1.0, &thr);
+        assert_eq!(ok.status, HealthStatus::Ok);
+        assert!(ok.value.contains("no TCP stack errors"), "{}", ok.value);
+
+        // Counter reset (second lower) -> 0, not a spike.
+        assert_eq!(
+            net_tcp_errors_metric(snmp1, snmp2, &s2, &s1, 1.0, &thr).status,
+            HealthStatus::Ok
+        );
+        // Missing TcpExt -> Unknown (never gates); absent SNMP just drops the note.
+        assert_eq!(
+            net_tcp_errors_metric("", "", "", "", 1.0, &thr).status,
+            HealthStatus::Unknown
+        );
+        let no_snmp = net_tcp_errors_metric("", "", &s1, &s2, 1.0, &thr);
+        assert_eq!(no_snmp.status, HealthStatus::Crit);
+        assert!(!no_snmp.detail.contains("retrans"), "{}", no_snmp.detail);
+    }
+
+    #[test]
+    fn kernel_events_metric_ranks_and_gates() {
+        // Absent dmesg (non-privileged) -> Unknown (never gates).
+        assert_eq!(
+            kernel_events_metric(&outputs(&[])).status,
+            HealthStatus::Unknown
+        );
+        // Clean log -> Ok.
+        let clean = kernel_events_metric(&outputs(&[("sudo -n dmesg", "[0.0] booting\n")]));
+        assert_eq!(clean.status, HealthStatus::Ok);
+        assert_eq!(clean.numeric, Some(0.0));
+        // A soft (FS) event only -> Warn.
+        let warn = kernel_events_metric(&outputs(&[(
+            "sudo -n dmesg",
+            "[1.0] EXT4-fs error (device vda1): reading directory\n",
+        )]));
+        assert_eq!(warn.status, HealthStatus::Warn);
+        // A hard fault -> Crit.
+        let crit = kernel_events_metric(&outputs(&[(
+            "sudo -n dmesg",
+            "[1.0] Kernel panic - not syncing: Attempted to kill init!\n",
+        )]));
+        assert_eq!(crit.status, HealthStatus::Crit);
+        assert_eq!(crit.numeric, Some(1.0));
     }
 
     #[test]

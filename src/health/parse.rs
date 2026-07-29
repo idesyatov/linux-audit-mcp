@@ -372,6 +372,142 @@ pub fn parse_conntrack_drops(output: &str) -> Option<(u64, u64, u64)> {
     (rows > 0).then_some((drop, early, insf))
 }
 
+/// Parse TCP stack-pressure counters from `/proc/net/netstat` into cumulative
+/// `(abort_on_memory, prune_called, rcvq_drop)`. Same `TcpExt:` header/value pair
+/// shape as [`parse_netstat_listen`], columns found by name. Tolerant: a column an
+/// older kernel lacks contributes 0, so `None` means only that the `TcpExt` value
+/// line is absent entirely.
+pub fn parse_netstat_tcp_errors(output: &str) -> Option<(u64, u64, u64)> {
+    let mut names: Option<Vec<&str>> = None;
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("TcpExt:") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        match &names {
+            None => names = Some(fields), // first TcpExt line = column names
+            Some(cols) => {
+                // second TcpExt line = values, in the same column order
+                let val = |name: &str| {
+                    cols.iter()
+                        .position(|c| *c == name)
+                        .and_then(|i| fields.get(i))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                return Some((
+                    val("TCPAbortOnMemory"),
+                    val("PruneCalled"),
+                    val("TCPRcvQDrop"),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Parse `Tcp: RetransSegs` (cumulative TCP retransmitted segments) from
+/// `/proc/net/snmp`. The file has a `Tcp:` name line then a `Tcp:` value line;
+/// the `RetransSegs` column is found by name. `None` if the pair or column is
+/// absent. Some `Tcp:` fields (e.g. `MaxConn`) are signed, but `RetransSegs` is a
+/// counter, so `u64` is correct.
+pub fn parse_snmp_tcp(output: &str) -> Option<u64> {
+    let mut names: Option<Vec<&str>> = None;
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("Tcp:") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        match &names {
+            None => names = Some(fields),
+            Some(cols) => {
+                let i = cols.iter().position(|c| *c == "RetransSegs")?;
+                return fields.get(i)?.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+/// One kernel-log category with its hit count and most-recent matching line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KernelEventCategory {
+    pub label: &'static str,
+    pub count: usize,
+    pub last_line: String,
+    pub critical: bool,
+}
+
+/// Result of scanning the kernel ring buffer for curated failure signatures.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KernelEvents {
+    /// Matched categories, in signature order (only non-empty ones appear).
+    pub categories: Vec<KernelEventCategory>,
+}
+
+impl KernelEvents {
+    /// Total matched lines across all categories.
+    pub fn total(&self) -> usize {
+        self.categories.iter().map(|c| c.count).sum()
+    }
+
+    /// Whether any matched category is a critical (Crit-worthy) fault.
+    pub fn any_critical(&self) -> bool {
+        self.categories.iter().any(|c| c.critical)
+    }
+}
+
+/// Curated kernel-log signatures: `(substring, category label, critical)`.
+/// Deliberately conservative - kernel wording drifts across versions, so each
+/// needle is chosen to avoid benign lines (e.g. the boot-time `Machine check
+/// events logged` note is *not* matched; only an actual `Machine Check Exception`
+/// / `Hardware Error` is). OOM kills are covered by `health-oom`, not here.
+const KERNEL_SIGNATURES: &[(&str, &str, bool)] = &[
+    ("soft lockup", "soft lockup", true),
+    ("blocked for more than", "hung task", true),
+    ("Kernel panic", "kernel panic", true),
+    ("Hardware Error", "hardware error (MCE)", true),
+    ("Machine Check Exception", "machine check exception", true),
+    ("Oops", "kernel oops", true),
+    ("BUG:", "kernel BUG", true),
+    ("nf_conntrack: table full", "conntrack table full", false),
+    (
+        "neighbour table overflow",
+        "neighbour table overflow",
+        false,
+    ),
+    ("EXT4-fs error", "ext4 filesystem error", false),
+    ("blk_update_request", "block I/O error", false),
+];
+
+/// Scan `dmesg` output for the curated [`KERNEL_SIGNATURES`]. Each line is counted
+/// under the first signature it matches (specific patterns are ordered first), so
+/// a `BUG: soft lockup` line lands in `soft lockup`, not `kernel BUG`. The most
+/// recent matching line per category is kept for the report detail.
+pub fn parse_kernel_events(output: &str) -> KernelEvents {
+    let mut categories: Vec<KernelEventCategory> = Vec::new();
+    for line in output.lines() {
+        for (needle, label, critical) in KERNEL_SIGNATURES {
+            if line.contains(needle) {
+                match categories.iter_mut().find(|c| c.label == *label) {
+                    Some(c) => {
+                        c.count += 1;
+                        c.last_line = line.trim().to_string();
+                    }
+                    None => categories.push(KernelEventCategory {
+                        label,
+                        count: 1,
+                        last_line: line.trim().to_string(),
+                        critical: *critical,
+                    }),
+                }
+                break;
+            }
+        }
+    }
+    KernelEvents { categories }
+}
+
 /// One process row from `ps -eo pid,comm,pcpu,pmem`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ProcInfo {
@@ -744,6 +880,34 @@ mod tests {
     }
 
     #[test]
+    fn netstat_tcp_errors_finds_columns_by_name() {
+        let out = "TcpExt: SyncookiesSent TCPAbortOnMemory PruneCalled TCPRcvQDrop TCPHPHits\n\
+                   TcpExt: 3 7 12 4 999\n\
+                   IpExt: InNoRoutes InTruncatedPkts\n\
+                   IpExt: 0 0\n";
+        assert_eq!(parse_netstat_tcp_errors(out), Some((7, 12, 4)));
+        // Older kernel missing a column -> that column contributes 0.
+        let old = "TcpExt: SyncookiesSent PruneCalled\n\
+                   TcpExt: 3 12\n";
+        assert_eq!(parse_netstat_tcp_errors(old), Some((0, 12, 0)));
+        // No TcpExt value line -> None.
+        assert_eq!(parse_netstat_tcp_errors("IpExt: A B\nIpExt: 1 2\n"), None);
+    }
+
+    #[test]
+    fn snmp_tcp_reads_retrans_segs() {
+        let out = "Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens RetransSegs InErrs\n\
+                   Tcp: 1 200 120000 -1 5 42 0\n\
+                   Udp: InDatagrams NoPorts\n\
+                   Udp: 100 2\n";
+        assert_eq!(parse_snmp_tcp(out), Some(42));
+        // No RetransSegs column -> None.
+        assert_eq!(parse_snmp_tcp("Tcp: RtoMin\nTcp: 200\n"), None);
+        // No Tcp value line -> None.
+        assert_eq!(parse_snmp_tcp("Udp: InDatagrams\nUdp: 1\n"), None);
+    }
+
+    #[test]
     fn pid_usage_reads_tasks_and_max() {
         assert_eq!(
             parse_pid_usage("0.15 0.10 0.05 1/234 5678\n32768\n"),
@@ -783,6 +947,34 @@ mod tests {
         assert_eq!(parse_oom_kills(out), 2);
         assert_eq!(parse_oom_kills("clean boot\n"), 0);
         assert_eq!(parse_oom_kills(""), 0);
+    }
+
+    #[test]
+    fn kernel_events_categorize_and_rank() {
+        let out = "[0.0] Linux version 6.1.0\n\
+                   [1.2] EXT4-fs (vda1): mounted filesystem\n\
+                   [3.4] EXT4-fs error (device vda1): ext4_find_entry: reading directory\n\
+                   [5.6] nf_conntrack: table full, dropping packet\n\
+                   [7.8] watchdog: BUG: soft lockup - CPU#0 stuck for 22s\n\
+                   [9.0] mce: [Hardware Error]: CPU 0: Machine Check: 0 Bank 4\n";
+        let ev = parse_kernel_events(out);
+        assert_eq!(ev.total(), 4); // ext4-error, conntrack-full, soft-lockup, hardware-error
+        assert!(ev.any_critical()); // soft lockup + hardware error are critical
+                                    // The benign `EXT4-fs (vda1): mounted` line is NOT matched.
+        let ext4 = ev
+            .categories
+            .iter()
+            .find(|c| c.label == "ext4 filesystem error")
+            .unwrap();
+        assert_eq!(ext4.count, 1);
+        assert!(!ext4.critical);
+        // `BUG: soft lockup` lands in soft-lockup (ordered first), not kernel BUG.
+        assert!(ev.categories.iter().any(|c| c.label == "soft lockup"));
+        assert!(!ev.categories.iter().any(|c| c.label == "kernel BUG"));
+        // A clean log -> nothing, not critical.
+        let clean = parse_kernel_events("[0.0] booting\n[1.0] all good\n");
+        assert_eq!(clean.total(), 0);
+        assert!(!clean.any_critical());
     }
 
     #[test]

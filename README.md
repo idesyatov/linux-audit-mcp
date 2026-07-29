@@ -272,7 +272,9 @@ listen_overflow_warn_pps = 1.0   # TCP accept-queue overflow rate (events/s); he
 listen_overflow_crit_pps = 10.0
 conntrack_drop_warn_pps = 1.0    # conntrack early_drop+insert_failed rate (events/s); healthy = 0 (health-conntrack-drops)
 conntrack_drop_crit_pps = 10.0
-net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat + nf_conntrack samples
+tcp_err_warn_pps = 1.0    # TCP stack pressure rate (events/s): abort-on-mem+prune+rcvq-drop; healthy = 0 (health-tcp-errors)
+tcp_err_crit_pps = 10.0
+net_sample_secs = 1       # gap between the two /proc/net/dev + /proc/net/netstat + nf_conntrack + snmp samples
 failed_units_crit = 0     # failed systemd services: any → Warn; ≥ this count → Crit (0 = never Crit)
 top_n = 5                 # hot processes listed per resource
 ```
@@ -688,10 +690,12 @@ reported `UNKNOWN` and never gates.
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd service → Warn (≥ `failed_units_crit` → Crit) |
 | `health-zombies`      | `ps -eo stat --no-headers`                 | any zombie (defunct) process → Warn (≥ `zombie_crit` → Crit); a leaking parent isn't reaping children |
 | `health-oom` 🔑       | `sudo -n dmesg`                            | any OOM-killer kill since boot → Warn; privileged-only, else n/a |
+| `health-kernel-events` 🔑 | `sudo -n dmesg`                        | curated kernel-log failure signatures since boot — FS/block-I/O errors, conntrack/neighbour-table overflows → Warn; hard faults (panic/BUG/oops/soft-lockup/hung-task/MCE) → Crit; privileged-only (shares the `dmesg` read), else n/a |
 | `health-containers`   | `docker ps -a`, `podman ps -a` (`sudo -n …` on privileged targets) | a `Restarting` (crash-loop) container → Crit; `unhealthy` → Warn; no runtime → n/a |
 | `health-net-throughput` | `cat /proc/net/dev` (×2, ~1s apart)      | per-interface rx/tx MiB/s; informational unless net thresholds set |
 | `health-net-errors`   | `cat /proc/net/dev` (×2, ~1s apart)        | per-interface error rate (pkts/s) ≥ threshold (bad NIC/driver/queue); drops shown as context |
 | `health-listen-overflows` | `cat /proc/net/netstat` (×2, ~1s apart) | TCP accept-queue overflow rate (events/s) ≥ `listen_overflow_warn_pps`/`_crit_pps` (server not accepting fast enough) |
+| `health-tcp-errors`   | `cat /proc/net/snmp` + `/proc/net/netstat` (×2, ~1s apart) | TCP stack pressure rate (events/s) ≥ `tcp_err_warn_pps`/`tcp_err_crit_pps` — gates on TCPAbortOnMemory+PruneCalled+TCPRcvQDrop (stack shedding connections); retransmit rate shown as context, never gated; since-boot totals as context |
 
 The text report's headline is a **diagnosis**: the overall status followed by a
 compact reason for every metric that isn't `OK` (e.g. `WARN — net-errors: eth0 err

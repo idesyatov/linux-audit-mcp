@@ -15,6 +15,7 @@
     "health-failed-units": "ok",
     "health-zombies": "ok",
     "health-oom": "unknown",
+    "health-kernel-events": "unknown",
     "health-containers": "ok"
   },
   "overall": "ok"

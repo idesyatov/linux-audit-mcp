@@ -44,6 +44,11 @@ pub struct Snapshot {
     /// a unit that newly failed. Absent in pre-0.16 snapshots -> empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_units: Vec<String>,
+    /// Cumulative since-boot event counters at snapshot time (conntrack table
+    /// pressure, kernel-log event counts per category); lets the next run report
+    /// how many new events accrued since. Absent in pre-0.28 snapshots -> empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub event_counters: BTreeMap<String, u64>,
 }
 
 impl Snapshot {
@@ -61,6 +66,7 @@ impl Snapshot {
             metrics,
             containers: report.container_uptimes.clone(),
             failed_units: report.failed_units.clone(),
+            event_counters: report.event_counters.clone(),
         }
     }
 }
@@ -648,6 +654,7 @@ mod tests {
             metrics,
             containers: BTreeMap::new(),
             failed_units: Vec::new(),
+            event_counters: BTreeMap::new(),
         }
     }
 

@@ -2,3 +2,4 @@
 [    1.234567] EXT4-fs (vda1): mounted filesystem with ordered data mode.
 [   12.345678] systemd[1]: Started Journal Service.
 [   45.678901] nginx[812]: start worker processes
+[ 3456.789012] EXT4-fs error (device vda1): ext4_find_entry:1612: inode #131074: comm nginx: reading directory lblock 0

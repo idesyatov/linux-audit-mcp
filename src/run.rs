@@ -172,6 +172,27 @@ pub fn annotate_changes(outcomes: &mut [HealthOutcome]) {
                 changes.push(format!("unit {u} newly failed since last check"));
             }
         }
+        // Cumulative since-boot event counters that rose versus last check
+        // (conntrack table pressure, kernel-log events per category). saturating_sub
+        // ignores a counter reset (reboot). A category present now but absent last
+        // check counts as fully new - but only when the previous snapshot actually
+        // tracked counters, so upgrading from a pre-0.28 snapshot doesn't report the
+        // whole since-boot backlog as "new".
+        let prev_tracked = !prev.event_counters.is_empty();
+        for (key, &cur) in &report.event_counters {
+            match prev.event_counters.get(key) {
+                Some(&was) => {
+                    let delta = cur.saturating_sub(was);
+                    if delta > 0 {
+                        changes.push(format!("since last check: +{delta} {key}"));
+                    }
+                }
+                None if prev_tracked && cur > 0 => {
+                    changes.push(format!("since last check: +{cur} {key} (new)"));
+                }
+                None => {}
+            }
+        }
         changes.sort();
         report.changes = changes;
     }
@@ -339,6 +360,7 @@ mod tests {
             changes: vec![],
             container_uptimes: BTreeMap::new(),
             failed_units: vec![],
+            event_counters: BTreeMap::new(),
         }
     }
 
@@ -351,6 +373,7 @@ mod tests {
             metrics: m,
             containers: BTreeMap::new(),
             failed_units: Vec::new(),
+            event_counters: BTreeMap::new(),
         }
     }
 
@@ -393,8 +416,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A snapshot carrying container uptimes and failed units, for the changes test.
-    fn snap_state(ts: u64, containers: &[(&str, u64)], failed: &[&str]) -> Snapshot {
+    /// A snapshot carrying container uptimes, failed units and event counters, for
+    /// the changes test.
+    fn snap_state(
+        ts: u64,
+        containers: &[(&str, u64)],
+        failed: &[&str],
+        events: &[(&str, u64)],
+    ) -> Snapshot {
         Snapshot {
             ts,
             overall: HealthStatus::Ok,
@@ -404,16 +433,22 @@ mod tests {
                 .map(|(n, u)| (n.to_string(), *u))
                 .collect(),
             failed_units: failed.iter().map(|s| s.to_string()).collect(),
+            event_counters: events.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
         }
     }
 
-    fn state_report(containers: &[(&str, u64)], failed: &[&str]) -> Vec<HealthOutcome> {
+    fn state_report(
+        containers: &[(&str, u64)],
+        failed: &[&str],
+        events: &[(&str, u64)],
+    ) -> Vec<HealthOutcome> {
         let mut r = load_report(0.3);
         r.container_uptimes = containers
             .iter()
             .map(|(n, u)| (n.to_string(), *u))
             .collect();
         r.failed_units = failed.iter().map(|s| s.to_string()).collect();
+        r.event_counters = events.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         vec![HealthOutcome {
             alias: "web".to_string(),
             result: Ok(r),
@@ -427,30 +462,54 @@ mod tests {
         std::env::set_var("LINUX_AUDIT_DATA_DIR", &dir);
 
         // No history yet -> nothing flagged (first run is silent).
-        let mut first = state_report(&[("mtproxy", 40)], &[]);
+        let mut first = state_report(&[("mtproxy", 40)], &[], &[]);
         annotate_changes(&mut first);
         assert!(first[0].result.as_ref().unwrap().changes.is_empty());
 
-        // Previous run: mtproxy up 2 days, web up 1 hour, no failed units.
+        // Previous run: mtproxy up 2 days, web up 1 hour, no failed units; conntrack
+        // pressure at 100, one ext4 error already seen.
         record_in(
             &dir,
             "web",
-            &snap_state(1, &[("mtproxy", 172_800), ("web", 3_600)], &[]),
+            &snap_state(
+                1,
+                &[("mtproxy", 172_800), ("web", 3_600)],
+                &[],
+                &[("conntrack table pressure", 100), ("kernel: ext4 error", 1)],
+            ),
             0,
         )
         .unwrap();
 
-        // Now: mtproxy uptime dropped (restarted), web grew (fine), nginx failed.
-        let mut cur = state_report(&[("mtproxy", 40), ("web", 7_200)], &["nginx.service"]);
+        // Now: mtproxy uptime dropped (restarted), web grew (fine), nginx failed;
+        // conntrack pressure rose by 30, ext4 unchanged, a new block-I/O error class.
+        let mut cur = state_report(
+            &[("mtproxy", 40), ("web", 7_200)],
+            &["nginx.service"],
+            &[
+                ("conntrack table pressure", 130),
+                ("kernel: ext4 error", 1),
+                ("kernel: block I/O error", 2),
+            ],
+        );
         annotate_changes(&mut cur);
         let changes = &cur[0].result.as_ref().unwrap().changes;
-        assert_eq!(changes.len(), 2, "{changes:?}");
+        assert_eq!(changes.len(), 4, "{changes:?}");
         assert!(changes.iter().any(|c| c.contains("mtproxy restarted")));
         assert!(changes
             .iter()
             .any(|c| c.contains("nginx.service newly failed")));
         // web's uptime grew, so it is not reported as restarted.
         assert!(!changes.iter().any(|c| c.contains("web restarted")));
+        // Conntrack pressure rose by 30; a new event class is flagged fully; an
+        // unchanged counter (ext4) is silent.
+        assert!(changes
+            .iter()
+            .any(|c| c.contains("+30 conntrack table pressure")));
+        assert!(changes
+            .iter()
+            .any(|c| c.contains("+2 kernel: block I/O error (new)")));
+        assert!(!changes.iter().any(|c| c.contains("ext4")));
 
         std::env::remove_var("LINUX_AUDIT_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
