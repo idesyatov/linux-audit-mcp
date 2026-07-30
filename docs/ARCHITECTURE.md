@@ -117,7 +117,7 @@ RHEL, `dnf` on Debian): that is reported `Skipped` (not applicable), not an erro
 | `audit.rs`       | Runs each distinct command once (cached), then `evaluate()` → findings (pure).  |
 | `checks/mod.rs`  | `Check` trait, `Domain`/`Severity`/`Status`/`Finding`, `all_checks()`.          |
 | `checks/parse.rs`| Tolerant pure parsers (sshd_config, passwd, sysctl, unit-files, ss).            |
-| `checks/*.rs`    | The 46 checks, grouped by domain; each is a pure `evaluate(output) → Outcome`. `Check::privileged()` marks `sudo -n` checks, run only on opted-in targets (else `Skipped`). |
+| `checks/*.rs`    | The 47 checks, grouped by domain; each is a pure `evaluate(output) → Outcome`. `Check::privileged()` marks `sudo -n` checks, run only on opted-in targets (else `Skipped`). |
 | `scoring.rs`     | Weighted 0–100 score, `baseline`/`hardened` profiles, severity penalties.       |
 | `report.rs`      | Renders findings + score to text and JSON.                                      |
 | `health/mod.rs`  | Health probes + `Thresholds`; `collect()` (I/O, incl. 2-sample net) and pure `evaluate()`; no score. |

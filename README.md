@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 46 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 47 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -590,7 +590,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-46 checks; each reads one read-only command and applies the tool/OpenSSH default
+47 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -609,6 +609,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | ssh       | `ssh-client-alive-interval`    | Low      | `ClientAliveInterval` is 0/unset or > 900s |
 | ssh       | `ssh-permit-tunnel`            | Low      | `PermitTunnel` is not `no`                 |
 | ssh       | `ssh-weak-crypto`              | Medium   | weak `Ciphers`/`MACs`/`KexAlgorithms` set (effective set on 🔑 privileged targets) |
+| ssh       | `ssh-host-key-permissions`     | Medium   | a private host key (`/etc/ssh/ssh_host_*_key`) is other/world-readable (any local user can impersonate the server); group-readable `root:ssh_keys` is fine and not flagged |
 | accounts  | `accounts-nonroot-uid0`        | Critical | a non-`root` account has UID 0             |
 | accounts  | `accounts-pass-max-days`       | Low      | `PASS_MAX_DAYS` > 365 or unset             |
 | accounts  | `accounts-umask`               | Low      | default `UMASK` allows group/other access  |

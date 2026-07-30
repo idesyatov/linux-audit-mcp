@@ -12,6 +12,7 @@
     "ssh-client-alive-interval": "pass",
     "ssh-permit-tunnel": "pass",
     "ssh-weak-crypto": "pass",
+    "ssh-host-key-permissions": "pass",
     "accounts-nonroot-uid0": "pass",
     "accounts-pass-max-days": "pass",
     "accounts-umask": "pass",

@@ -518,10 +518,73 @@ impl Check for WeakCrypto {
     }
 }
 
+/// A private SSH host key is readable by "other" (world) - anyone on the host can
+/// read the server's private key and then impersonate it or decrypt captured
+/// traffic. Unprivileged: a file's *mode* is visible via a plain `find -perm` (stat
+/// needs only the world-executable `/etc/ssh`), so this runs on every target, not
+/// just privileged ones. Only "other"-readable (`-perm -004`) is flagged - a
+/// group-readable key (`root:ssh_keys`, used by RHEL/modern OpenSSH so sshd can drop
+/// privileges) is a deliberate, safe design and must not be false-flagged. Missing
+/// key types error per-path (tolerated); their absence is not a finding.
+pub struct HostKeyPermissions;
+
+impl Check for HostKeyPermissions {
+    fn id(&self) -> &'static str {
+        "ssh-host-key-permissions"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Ssh
+    }
+    fn title(&self) -> &'static str {
+        "SSH host key file permissions"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Remove other/world read from each private host key: chmod o-r <path> (0600 \
+         root:root, or 0640 root:ssh_keys). A world-readable host key lets any local \
+         user impersonate the server or decrypt captured sessions."
+    }
+    fn command(&self) -> &'static str {
+        "find /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ed25519_key -perm -004"
+    }
+    fn tolerate_nonzero_exit(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let found: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if found.is_empty() {
+            Outcome::pass("No world-readable private SSH host keys.")
+        } else {
+            Outcome::fail(format!(
+                "World-readable private SSH host keys: {}.",
+                found.join(", ")
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
     use super::*;
+
+    #[test]
+    fn host_key_permissions() {
+        assert!(!HostKeyPermissions.privileged()); // file mode is visible unprivileged
+        assert!(HostKeyPermissions.tolerate_nonzero_exit());
+        // Restrictive keys (0600, or 0640 root:ssh_keys) match nothing -> pass.
+        assert_eq!(HostKeyPermissions.evaluate("").status, Status::Pass);
+        // A world-readable private key is named and fails.
+        let out = HostKeyPermissions.evaluate("/etc/ssh/ssh_host_ed25519_key\n");
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("/etc/ssh/ssh_host_ed25519_key"));
+    }
 
     const HARDENED: &str = "PermitRootLogin no\n\
         PasswordAuthentication no\n\

@@ -357,6 +357,7 @@ impl Check for SuidBinaries {
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
+            .filter(|path| !is_container_path(path))
             .filter(|path| {
                 let base = path.rsplit('/').next().unwrap_or(path);
                 !KNOWN_SUID_BINARIES.contains(&base)
@@ -388,11 +389,21 @@ fn summarize_paths(paths: &[&str]) -> String {
     }
 }
 
+/// Paths under a container-storage root (`/var/lib/docker/`, `/var/lib/containers/`).
+/// Overlay/image layers there are managed by the runtime and routinely contain
+/// world-writable or setuid files from container images - runtime noise, not a host
+/// misconfiguration. The three whole-filesystem `find` scans (SUID, world-writable
+/// files, world-writable dirs) drop these so a container-hosting box isn't buried in
+/// false findings. `-xdev` doesn't help: overlay2 sits on the root filesystem.
+fn is_container_path(path: &str) -> bool {
+    path.starts_with("/var/lib/docker/") || path.starts_with("/var/lib/containers/")
+}
+
 /// World-writable regular files exist on the root filesystem - any local user can
 /// overwrite them (tampering, or a backdoor if the file is executed/sourced by a
 /// privileged process). Privileged: the scan runs as root so it sees every
 /// directory; a whole-filesystem scan may exit non-zero on a transient per-path
-/// error, which this check tolerates.
+/// error, which this check tolerates. Container-storage paths are excluded.
 pub struct WorldWritableFiles;
 
 impl Check for WorldWritableFiles {
@@ -426,6 +437,7 @@ impl Check for WorldWritableFiles {
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
+            .filter(|p| !is_container_path(p))
             .collect();
         if found.is_empty() {
             Outcome::pass("No world-writable files on the root filesystem.")
@@ -528,6 +540,7 @@ impl Check for WorldWritableDirs {
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
+            .filter(|p| !is_container_path(p))
             .collect();
         if found.is_empty() {
             Outcome::pass("No world-writable directories without the sticky bit.")
@@ -602,6 +615,33 @@ mod tests {
         let out = WorldWritableFiles.evaluate(&many);
         assert_eq!(out.status, Status::Fail);
         assert!(out.detail.contains("more"), "{}", out.detail);
+    }
+
+    #[test]
+    fn container_storage_paths_are_ignored() {
+        // Overlay/image layers under container storage are runtime noise, not host
+        // findings - all three whole-filesystem scans drop them.
+        let docker = "/var/lib/docker/overlay2/abc/lower\n";
+        let podman = "/var/lib/containers/storage/overlay/def/diff\n";
+        assert_eq!(
+            WorldWritableFiles
+                .evaluate(&format!("{docker}{podman}"))
+                .status,
+            Status::Pass
+        );
+        assert_eq!(WorldWritableDirs.evaluate(docker).status, Status::Pass);
+        // A container-image SUID binary (unknown basename) is ignored too.
+        assert_eq!(
+            SuidBinaries
+                .evaluate("/var/lib/docker/overlay2/abc/usr/local/bin/weird\n")
+                .status,
+            Status::Pass
+        );
+        // A real host path alongside a container path still fails.
+        let out = WorldWritableFiles.evaluate(&format!("{docker}/srv/app/config\n"));
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("/srv/app/config"));
+        assert!(!out.detail.contains("/var/lib/docker"), "{}", out.detail);
     }
 
     #[test]

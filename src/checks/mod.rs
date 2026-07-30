@@ -218,6 +218,7 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(ssh::ClientAliveInterval),
         Box::new(ssh::PermitTunnel),
         Box::new(ssh::WeakCrypto),
+        Box::new(ssh::HostKeyPermissions),
         // accounts
         Box::new(accounts::NonRootUid0),
         Box::new(accounts::PassMaxDays),

@@ -29,6 +29,11 @@ use std::fmt;
 pub const READONLY_COMMANDS: &[&str] = &[
     "cat /etc/os-release",
     "cat /etc/ssh/sshd_config",
+    // Private SSH host-key file modes (`ssh-host-key-permissions`). Reads only the
+    // mode via `find -perm -004` (stat, not the key content), so it is unprivileged
+    // and runs on every host. `-004` flags only other/world-readable keys; a missing
+    // key type errors per-path (tolerated). Read-only.
+    "find /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ed25519_key -perm -004",
     "cat /etc/login.defs",
     "getent passwd",
     "sysctl -a",
