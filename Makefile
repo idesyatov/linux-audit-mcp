@@ -7,8 +7,12 @@
 RELEASE_BRANCH ?= master
 # Crate version from Cargo.toml - must match the numeric part of the release tag.
 CARGO_VERSION := $(shell grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+# docker compose derives the project name from this directory (lowercased).
+# Named volumes are prefixed with it, e.g. <project>_target-cache. Override if
+# you set COMPOSE_PROJECT_NAME or clone into a differently-named directory.
+COMPOSE_PROJECT ?= $(notdir $(CURDIR))
 
-.PHONY: help build dev test lint build-release check version clean bump release
+.PHONY: help build dev test lint build-release check version clean clean-target bump release
 
 help: ## Show the list of targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -34,8 +38,12 @@ check: lint test ## Full pre-release check (same as CI)
 version: ## Print the crate version from Cargo.toml
 	@echo $(CARGO_VERSION)
 
-clean: ## Remove containers and volumes (cargo/target caches)
+clean: ## Full wipe: remove containers and ALL volumes (target + crate caches)
 	docker compose down -v
+
+clean-target: ## Reclaim space: drop only the ./target build cache, keep crate caches
+	docker compose down
+	-docker volume rm $(COMPOSE_PROJECT)_target-cache
 
 # Bump the crate version to match a release tag, sync the lockfile, and commit.
 # Usage: make bump VERSION=v0.1.1   (then: make release VERSION=v0.1.1)
