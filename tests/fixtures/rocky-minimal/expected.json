@@ -1,5 +1,5 @@
 {
-  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, a never-expiring password, an unexpected setuid-root binary (/usr/local/bin/rootshell), a system account with a login shell (svc, uid 150), ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (the apt updates check is skipped as not applicable). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
+  "description": "Rocky/RHEL host, privileged (opted in): root login and password auth on, X11 forwarding on, no password expiry, a legacy MD5 password hash, a never-expiring password, an unexpected setuid-root binary (/usr/local/bin/rootshell), a system account with a login shell (svc, uid 150), ip_forward enabled, ptrace unrestricted, suid_dumpable on, unprivileged BPF on, a world-writable non-sticky directory (/srv/upload), telnet listening, rpcbind enabled. firewalld/auditd/rsyslog on. apt-get is absent (the apt updates check is skipped as not applicable). The file sshd_config lists weak ciphers/MACs, but `sshd -T` shows the effective set (crypto-policy hardened) has none, so ssh-weak-crypto passes on the effective config. Effective ClientAliveInterval is 0, so idle sessions are never disconnected.",
   "privileged": true,
   "findings": {
     "ssh-permit-root-login": "fail",
@@ -36,6 +36,7 @@
     "kernel-suid-binaries": "fail",
     "kernel-world-writable-files": "fail",
     "kernel-cron-writable": "pass",
+    "kernel-world-writable-dirs": "fail",
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "pass",
     "firewall-iptables-default-deny": "pass",
@@ -49,7 +50,7 @@
     "logging-syslog": "pass"
   },
   "scores": {
-    "baseline": 16,
+    "baseline": 15,
     "hardened": 0
   }
 }

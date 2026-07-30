@@ -144,6 +144,11 @@ pub const READONLY_COMMANDS: &[&str] = &[
     // catalog forbids); `-type d` so this doesn't overlap the world-writable-files
     // scan. Missing paths just error per-path (tolerated); read-only.
     "sudo -n find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly -type d -perm -0002",
+    // World-writable directories WITHOUT the sticky bit (`-type d -perm -0002 -not
+    // -perm -1000`): any user can delete/replace another's files there. Sticky dirs
+    // (/tmp, /var/tmp, /dev/shm) are correctly excluded. `-not` is the long form of
+    // `!` (the catalog charset rejects `!`). Same `-xdev`/tolerate-nonzero discipline.
+    "sudo -n find / -xdev -type d -perm -0002 -not -perm -1000",
     // Effective SSH config: `sshd -T` dumps the *resolved* directives (compiled
     // defaults + Match blocks). On an opted-in target its output supersedes the
     // file read for every ssh-domain check, making them authoritative.

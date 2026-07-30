@@ -36,6 +36,7 @@
     "kernel-suid-binaries": "pass",
     "kernel-world-writable-files": "pass",
     "kernel-cron-writable": "pass",
+    "kernel-world-writable-dirs": "pass",
     "firewall-enabled": "fail",
     "firewall-nft-default-deny": "skipped",
     "firewall-iptables-default-deny": "pass",

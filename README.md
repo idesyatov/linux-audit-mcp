@@ -50,7 +50,7 @@ Health of 'db': WARN (operational, not a security score)
 
 - **Read-only by construction** 🔒 — every command is a byte-for-byte member of a
   curated catalog and runs as an unprivileged user; the tool *cannot* change the host.
-- **Security audit** — 45 checks across 7 domains (ssh, accounts, kernel, firewall,
+- **Security audit** — 46 checks across 7 domains (ssh, accounts, kernel, firewall,
   updates, services, logging), each with a severity and a concrete fix, rolled up
   into a weighted **0–100 score** with `baseline` / `hardened` profiles.
 - **Operational health** — a separate snapshot of load, memory, disk, hot processes,
@@ -590,7 +590,7 @@ cosign verify ghcr.io/idesyatov/linux-audit-mcp:latest \
 <details>
 <summary><b>Checks</b></summary>
 
-45 checks; each reads one read-only command and applies the tool/OpenSSH default
+46 checks; each reads one read-only command and applies the tool/OpenSSH default
 when a setting is absent. A command unavailable on the host (e.g. `apt-get` on
 RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 **privileged** (need `sudo`) and run only on targets opted in with
@@ -632,6 +632,7 @@ RHEL) is reported as `error` and excluded from the score. Checks marked 🔑 are
 | kernel    | `kernel-suid-binaries` 🔑      | Medium   | a setuid-root binary outside the known-good set exists on the root filesystem |
 | kernel    | `kernel-world-writable-files` 🔑 | Medium | a world-writable regular file exists on the root filesystem (anyone can overwrite it) |
 | kernel    | `kernel-cron-writable` 🔑      | Medium   | a cron drop-in directory (`/etc/cron.d`, …) is world-writable (any user can schedule a root job) |
+| kernel    | `kernel-world-writable-dirs` 🔑 | Medium  | a world-writable directory **without the sticky bit** exists (any user can delete/replace another's files; `/tmp` etc. are sticky and excluded) |
 | firewall  | `firewall-enabled`             | High     | no firewalld/ufw/nftables enabled          |
 | firewall  | `firewall-nft-default-deny` 🔑 | Medium   | live `nft` input hook accepts everything (defers if the host uses the iptables-legacy backend) |
 | firewall  | `firewall-iptables-default-deny` 🔑 | Medium   | live iptables-legacy `INPUT` chain accepts everything (defers to nft when legacy tables are empty) |
@@ -680,7 +681,7 @@ Grant the auditor **passwordless sudo for exactly these commands** — never `AL
 On the target (`visudo -f /etc/sudoers.d/linux-audit`):
 
 ```
-auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/bin/find / -xdev -perm -4000 -type f, /usr/bin/find / -xdev -type f -perm -0002, /usr/bin/find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly -type d -perm -0002, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset, /usr/sbin/iptables -S, /usr/bin/dmesg, /usr/bin/docker ps -a, /usr/bin/podman ps -a
+auditor ALL=(root) NOPASSWD: /usr/bin/cat /etc/shadow, /usr/bin/find / -xdev -perm -4000 -type f, /usr/bin/find / -xdev -type f -perm -0002, /usr/bin/find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly -type d -perm -0002, /usr/bin/find / -xdev -type d -perm -0002 -not -perm -1000, /usr/sbin/sshd -T, /usr/sbin/nft list ruleset, /usr/sbin/iptables -S, /usr/bin/dmesg, /usr/bin/docker ps -a, /usr/bin/podman ps -a
 ```
 
 Skipped checks are excluded from the score (like `error`); the report shows them

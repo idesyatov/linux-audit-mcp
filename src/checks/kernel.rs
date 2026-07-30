@@ -487,6 +487,59 @@ impl Check for CronWritable {
     }
 }
 
+/// A world-writable directory without the sticky bit exists on the root filesystem -
+/// any local user can create, rename or delete files in it, including replacing
+/// another user's files (a swap/symlink attack vector). Sticky-bit dirs (`/tmp`,
+/// `/var/tmp`, `/dev/shm`) are correctly excluded via `-not -perm -1000` (the `!`
+/// operator is rejected by the catalog charset, so the long-form `-not` is used).
+/// Privileged: the scan runs as root so it sees every directory; a whole-filesystem
+/// scan may exit non-zero on a transient per-path error, which this check tolerates.
+pub struct WorldWritableDirs;
+
+impl Check for WorldWritableDirs {
+    fn id(&self) -> &'static str {
+        "kernel-world-writable-dirs"
+    }
+    fn domain(&self) -> Domain {
+        Domain::Kernel
+    }
+    fn title(&self) -> &'static str {
+        "World-writable directories (no sticky bit)"
+    }
+    fn severity(&self) -> Severity {
+        Severity::Medium
+    }
+    fn recommendation(&self) -> &'static str {
+        "Add the sticky bit (chmod +t <dir>) so only owners can delete their files, \
+         or remove world write (chmod o-w <dir>). Without it, any user can replace \
+         another user's files in the directory."
+    }
+    fn command(&self) -> &'static str {
+        "sudo -n find / -xdev -type d -perm -0002 -not -perm -1000"
+    }
+    fn privileged(&self) -> bool {
+        true
+    }
+    fn tolerate_nonzero_exit(&self) -> bool {
+        true
+    }
+    fn evaluate(&self, output: &str) -> Outcome {
+        let found: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if found.is_empty() {
+            Outcome::pass("No world-writable directories without the sticky bit.")
+        } else {
+            Outcome::fail(format!(
+                "World-writable directories without sticky bit: {}.",
+                summarize_paths(&found)
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::Status;
@@ -528,6 +581,18 @@ mod tests {
         let out = CronWritable.evaluate("/etc/cron.d\n");
         assert_eq!(out.status, Status::Fail);
         assert!(out.detail.contains("/etc/cron.d"));
+    }
+
+    #[test]
+    fn world_writable_dirs() {
+        assert!(WorldWritableDirs.privileged());
+        assert!(WorldWritableDirs.tolerate_nonzero_exit());
+        // Empty scan (sticky /tmp etc. excluded by the find expression) -> pass.
+        assert_eq!(WorldWritableDirs.evaluate("").status, Status::Pass);
+        // A world-writable non-sticky dir -> fail, naming the path.
+        let out = WorldWritableDirs.evaluate("/srv/shared\n");
+        assert_eq!(out.status, Status::Fail);
+        assert!(out.detail.contains("/srv/shared"));
     }
 
     #[test]

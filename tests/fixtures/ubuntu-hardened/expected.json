@@ -35,6 +35,7 @@
     "kernel-suid-binaries": "skipped",
     "kernel-world-writable-files": "skipped",
     "kernel-cron-writable": "skipped",
+    "kernel-world-writable-dirs": "skipped",
     "firewall-enabled": "pass",
     "firewall-nft-default-deny": "skipped",
     "firewall-iptables-default-deny": "skipped",
