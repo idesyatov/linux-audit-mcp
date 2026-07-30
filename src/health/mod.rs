@@ -322,6 +322,11 @@ pub struct Thresholds {
     /// host is disk-bound.
     pub iowait_warn_pct: f64,
     pub iowait_crit_pct: f64,
+    /// Swap-out rate (`so`, KiB/s) from vmstat (`health-swap-io`). A healthy host
+    /// holds this near 0; sustained swap-out is memory pressure evicting pages -
+    /// the thrash that precedes an OOM kill. Gated on `so`; `si` is context only.
+    pub swap_out_warn_kibps: f64,
+    pub swap_out_crit_kibps: f64,
     /// Per-interface network throughput (MiB/s). `0` disables that bound, so
     /// network is informational (always `Ok`) unless a threshold is set.
     pub net_rx_warn_mibps: f64,
@@ -388,6 +393,8 @@ impl Default for Thresholds {
             tcp_crit_pct: 90,
             iowait_warn_pct: 20.0,
             iowait_crit_pct: 50.0,
+            swap_out_warn_kibps: 1024.0,
+            swap_out_crit_kibps: 10240.0,
             net_rx_warn_mibps: 0.0,
             net_rx_crit_mibps: 0.0,
             net_tx_warn_mibps: 0.0,
@@ -727,6 +734,29 @@ fn iowait_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
         value: format!("{:.0}% iowait", v.iowait),
         detail: format!("{} proc(s) blocked, {:.0}% steal", v.blocked, v.steal),
         numeric: Some(v.iowait),
+    }
+}
+
+/// Swap paging activity (`si`/`so` from the already-collected `vmstat 1 2`, KiB/s).
+/// Sustained swap-out means the kernel is evicting pages under memory pressure - the
+/// thrash phase that precedes an OOM kill, and a disk-bound slowdown in its own
+/// right. Distinct from `health-swap` (capacity used, static) and `health-iowait`
+/// (CPU waiting on I/O). Gated on `so` (swap-out = active eviction); `si` (swap-in)
+/// is context only, not gated - faulting cold pages back in can be benign. Reuses
+/// vmstat, so it is distro-agnostic with no new command.
+fn swap_io_metric(outputs: &Outputs, thr: &Thresholds) -> Metric {
+    const ID: &str = "health-swap-io";
+    const TITLE: &str = "Swap I/O";
+    let Some(v) = out(outputs, VMSTAT).and_then(parse::parse_vmstat) else {
+        return unknown(ID, TITLE, "vmstat unavailable");
+    };
+    Metric {
+        id: ID,
+        title: TITLE,
+        status: threshold_status(v.swap_out, thr.swap_out_warn_kibps, thr.swap_out_crit_kibps),
+        value: format!("{:.0} KiB/s swap-out", v.swap_out),
+        detail: format!("si {:.0} KiB/s, so {:.0} KiB/s", v.swap_in, v.swap_out),
+        numeric: Some(v.swap_out),
     }
 }
 
@@ -1464,6 +1494,7 @@ pub fn evaluate(outputs: &Outputs, thr: &Thresholds) -> HealthReport {
     metrics.push(pids_metric(outputs, thr));
     metrics.push(tcp_mem_metric(outputs, thr));
     metrics.push(iowait_metric(outputs, thr));
+    metrics.push(swap_io_metric(outputs, thr));
     metrics.push(network_metric(outputs));
     metrics.push(failed_units_metric(outputs, thr));
     metrics.push(zombie_metric(outputs, thr));
@@ -2086,6 +2117,40 @@ mod tests {
         // Missing vmstat -> Unknown (never gates).
         assert_eq!(
             iowait_metric(&outputs(&[]), &thr).status,
+            HealthStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn swap_io_thresholds() {
+        let thr = Thresholds::default(); // warn 1024, crit 10240 KiB/s swap-out
+        let vm = |si: u32, so: u32| {
+            format!(
+                "r b swpd free buff cache si so bi bo in cs us sy id wa st\n\
+                 1 0 0 100 100 100 {si} {so} 10 20 100 200 5 2 90 1 0\n"
+            )
+        };
+        // Gated on `so`: swap-out drives the status.
+        assert_eq!(
+            swap_io_metric(&outputs(&[("vmstat 1 2", vm(0, 0).as_str())]), &thr).status,
+            HealthStatus::Ok
+        );
+        assert_eq!(
+            swap_io_metric(&outputs(&[("vmstat 1 2", vm(0, 4096).as_str())]), &thr).status,
+            HealthStatus::Warn
+        );
+        assert_eq!(
+            swap_io_metric(&outputs(&[("vmstat 1 2", vm(0, 20000).as_str())]), &thr).status,
+            HealthStatus::Crit
+        );
+        // `si` (swap-in) is context only - a high si with no so does not gate.
+        assert_eq!(
+            swap_io_metric(&outputs(&[("vmstat 1 2", vm(50000, 0).as_str())]), &thr).status,
+            HealthStatus::Ok
+        );
+        // Missing vmstat -> Unknown (never gates).
+        assert_eq!(
+            swap_io_metric(&outputs(&[]), &thr).status,
             HealthStatus::Unknown
         );
     }

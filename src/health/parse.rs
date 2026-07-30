@@ -787,7 +787,7 @@ pub fn parse_ss_summary(output: &str) -> Option<SocketSummary> {
     })
 }
 
-/// CPU-pressure figures from the current (second) sample of `vmstat 1 2`.
+/// CPU- and memory-pressure figures from the current (second) sample of `vmstat 1 2`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VmStat {
     /// `wa`: percent of CPU time waiting on I/O.
@@ -796,14 +796,27 @@ pub struct VmStat {
     pub steal: f64,
     /// `b`: processes blocked on I/O.
     pub blocked: u64,
+    /// `si`: memory swapped in from disk, KiB/s (0 if absent).
+    pub swap_in: f64,
+    /// `so`: memory swapped out to disk, KiB/s (0 if absent).
+    pub swap_out: f64,
 }
 
-/// Parse `vmstat 1 2`. The column header (`... us sy id wa st`) is located by
+/// Column indices located by name from the `vmstat` header, so field-order
+/// variations are tolerated. `wa` is required; the rest are optional.
+struct VmCols {
+    wa: usize,
+    st: Option<usize>,
+    b: Option<usize>,
+    si: Option<usize>,
+    so: Option<usize>,
+}
+
+/// Parse `vmstat 1 2`. The column header (`... si so ... wa st`) is located by
 /// name, so field order variations are tolerated, and the *last* all-numeric row
 /// is used - i.e. the one-second delta, not the since-boot average in row one.
 pub fn parse_vmstat(output: &str) -> Option<VmStat> {
-    // Column indices for wa/st/b, taken from the name header.
-    let mut cols: Option<(usize, Option<usize>, Option<usize>)> = None;
+    let mut cols: Option<VmCols> = None;
     let mut last_data: Option<Vec<f64>> = None;
     for line in output.lines() {
         let toks: Vec<&str> = line.split_whitespace().collect();
@@ -814,7 +827,13 @@ pub fn parse_vmstat(output: &str) -> Option<VmStat> {
         if toks.contains(&"wa") {
             let idx = |name: &str| toks.iter().position(|t| *t == name);
             if let Some(wa) = idx("wa") {
-                cols = Some((wa, idx("st"), idx("b")));
+                cols = Some(VmCols {
+                    wa,
+                    st: idx("st"),
+                    b: idx("b"),
+                    si: idx("si"),
+                    so: idx("so"),
+                });
             }
             continue;
         }
@@ -823,15 +842,19 @@ pub fn parse_vmstat(output: &str) -> Option<VmStat> {
             last_data = Some(toks.iter().filter_map(|t| t.parse().ok()).collect());
         }
     }
-    let (wa_i, st_i, b_i) = cols?;
+    let cols = cols?;
     let data = last_data?;
+    let at = |i: Option<usize>| i.and_then(|i| data.get(i)).copied().unwrap_or(0.0);
     Some(VmStat {
-        iowait: *data.get(wa_i)?,
-        steal: st_i.and_then(|i| data.get(i)).copied().unwrap_or(0.0),
-        blocked: b_i
+        iowait: *data.get(cols.wa)?,
+        steal: at(cols.st),
+        blocked: cols
+            .b
             .and_then(|i| data.get(i))
             .map(|v| *v as u64)
             .unwrap_or(0),
+        swap_in: at(cols.si),
+        swap_out: at(cols.so),
     })
 }
 
@@ -1235,11 +1258,13 @@ mod tests {
         let out = "procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----\n\
                    \x20r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st\n\
                    \x201  0      0 600000 200000 150000    0    0     5    12   90  180  3  1 95  1  0\n\
-                   \x204  2      0 590000 200000 150000    0    0   200   500  450  900 12  6 57 25  0\n";
+                   \x204  2      0 590000 200000 150000   64  512   200   500  450  900 12  6 57 25  0\n";
         let v = parse_vmstat(out).unwrap();
         assert_eq!(v.iowait, 25.0); // second (delta) row, not the boot average
         assert_eq!(v.blocked, 2);
         assert_eq!(v.steal, 0.0);
+        assert_eq!(v.swap_in, 64.0); // si/so read by column name from the delta row
+        assert_eq!(v.swap_out, 512.0);
     }
 
     #[test]

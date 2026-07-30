@@ -11,6 +11,7 @@
     "health-pids": "ok",
     "health-tcp-mem": "warn",
     "health-iowait": "warn",
+    "health-swap-io": "warn",
     "health-connections": "ok",
     "health-failed-units": "warn",
     "health-zombies": "ok",

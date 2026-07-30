@@ -263,6 +263,8 @@ tcp_warn_pct = 80         # worst of TCP mem/orphan/TIME_WAIT as % of its ceilin
 tcp_crit_pct = 90
 iowait_warn_pct = 20.0    # CPU time waiting on I/O (%) — host is disk-bound
 iowait_crit_pct = 50.0
+swap_out_warn_kibps = 1024.0   # swap-out rate (so, KiB/s) — memory pressure/thrash (health-swap-io)
+swap_out_crit_kibps = 10240.0
 net_rx_warn_mibps = 0.0   # per-interface throughput (MiB/s); 0 disables (informational)
 net_rx_crit_mibps = 0.0
 net_tx_warn_mibps = 0.0
@@ -710,6 +712,7 @@ reported `UNKNOWN` and never gates.
 | `health-pids`         | `cat /proc/loadavg /proc/sys/kernel/pid_max` | kernel tasks ≥ `pid_warn_pct`/`pid_crit_pct` of `pid_max` (fork/clone start failing) |
 | `health-tcp-mem`      | `cat /proc/net/sockstat` + `tcp_mem`/`tcp_max_orphans`/`tcp_max_tw_buckets` | worst of TCP memory / orphan / TIME_WAIT usage ≥ `tcp_warn_pct`/`tcp_crit_pct` of its ceiling (connections dropped/throttled) |
 | `health-iowait`       | `vmstat 1 2`                               | CPU I/O-wait % ≥ threshold (disk-bound host) |
+| `health-swap-io`      | `vmstat 1 2`                               | swap-out rate (`so`, KiB/s) ≥ `swap_out_warn_kibps`/`swap_out_crit_kibps` — the kernel is evicting pages under memory pressure (the thrash before an OOM kill); swap-in (`si`) shown as context, never gated. Reuses vmstat, so distro-agnostic |
 | `health-connections`  | `ss -s`                                    | informational (established/total count)  |
 | `health-failed-units` | `systemctl list-units --state=failed`      | any failed systemd unit — service, **timer** (a schedule stopped), **mount** (a filesystem didn't mount) or socket → Warn (≥ `failed_units_crit` → Crit) |
 | `health-zombies`      | `ps -eo stat --no-headers`                 | any zombie (defunct) process → Warn (≥ `zombie_crit` → Crit); a leaking parent isn't reaping children |
